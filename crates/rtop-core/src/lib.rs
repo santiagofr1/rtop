@@ -1,7 +1,9 @@
 //! Recolección de datos del sistema + config/temas, compartido por la TUI y la GUI.
 
 pub mod config;
+pub mod disk;
 pub mod fmt;
+pub mod gpu;
 
 use std::{
     collections::VecDeque,
@@ -9,11 +11,12 @@ use std::{
 };
 
 use sysinfo::{
-    Components, Networks, Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal,
+    Components, Disks, Networks, Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal,
     System, Users,
 };
 
 pub use config::{Config, Rgb, Theme};
+pub use gpu::{Gpu, Vendor};
 
 pub const HIST: usize = 300;
 
@@ -98,6 +101,10 @@ impl SortBy {
 pub struct Stats {
     pub host: String,
     pub cpu_brand: String,
+    /// "Ryzen 7 7445HS" en vez del nombre larguísimo
+    pub cpu_model: String,
+    /// MHz promedio
+    pub cpu_freq: u64,
     pub cores: Vec<f32>,
     pub cpu_total: f32,
     pub mem_total: u64,
@@ -109,6 +116,12 @@ pub struct Stats {
     pub rx_rate: f64,
     pub tx_rate: f64,
     pub temp_max: Option<f32>,
+    pub disk_read_rate: f64,
+    pub disk_write_rate: f64,
+    /// espacio del disco raíz
+    pub disk_used: u64,
+    pub disk_total: u64,
+    pub gpus: Vec<Gpu>,
     pub tasks: usize,
     pub running: usize,
 }
@@ -119,6 +132,9 @@ impl Stats {
     }
     pub fn swap_pct(&self) -> f32 {
         pct(self.swap_used, self.swap_total)
+    }
+    pub fn disk_pct(&self) -> f32 {
+        pct(self.disk_used, self.disk_total)
     }
 }
 
@@ -131,6 +147,9 @@ pub struct Monitor {
     users: Users,
     nets: Networks,
     comps: Components,
+    disks: Disks,
+    gpu: gpu::GpuPoller,
+    disk_prev: (u64, u64),
     last: Instant,
     pub stats: Stats,
     pub procs: Vec<Proc>,
@@ -138,6 +157,11 @@ pub struct Monitor {
     pub mem_hist: VecDeque<f32>,
     pub rx_hist: VecDeque<f64>,
     pub tx_hist: VecDeque<f64>,
+    pub disk_r_hist: VecDeque<f64>,
+    pub disk_w_hist: VecDeque<f64>,
+    /// por GPU (mismo orden que `stats.gpus`)
+    pub gpu_hist: Vec<VecDeque<f32>>,
+    pub vram_hist: Vec<VecDeque<f32>>,
 }
 
 impl Monitor {
@@ -145,11 +169,15 @@ impl Monitor {
         let mut sys = System::new_all();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         sys.refresh_all();
+        let brand = sys.cpus().first().map(|c| c.brand().to_string()).unwrap_or_default();
         let mut m = Monitor {
             sys,
             users: Users::new_with_refreshed_list(),
             nets: Networks::new_with_refreshed_list(),
             comps: Components::new_with_refreshed_list(),
+            disks: Disks::new_with_refreshed_list(),
+            gpu: gpu::GpuPoller::start(&brand, std::time::Duration::from_millis(1000)),
+            disk_prev: disk::totals(),
             last: Instant::now(),
             stats: Stats::default(),
             procs: Vec::new(),
@@ -157,6 +185,10 @@ impl Monitor {
             mem_hist: VecDeque::with_capacity(HIST),
             rx_hist: VecDeque::with_capacity(HIST),
             tx_hist: VecDeque::with_capacity(HIST),
+            disk_r_hist: VecDeque::with_capacity(HIST),
+            disk_w_hist: VecDeque::with_capacity(HIST),
+            gpu_hist: vec![],
+            vram_hist: vec![],
         };
         m.collect(0.0);
         m
@@ -174,6 +206,7 @@ impl Monitor {
         );
         self.nets.refresh(true);
         self.comps.refresh(false);
+        self.disks.refresh(false);
         self.collect(dt);
     }
 
@@ -184,6 +217,26 @@ impl Monitor {
             .filter(|(n, _)| *n != "lo")
             .fold((0u64, 0u64), |(r, t), (_, d)| (r + d.received(), t + d.transmitted()));
         let (rx_rate, tx_rate) = if dt > 0.0 { (rx as f64 / dt, tx as f64 / dt) } else { (0.0, 0.0) };
+
+        let dnow = disk::totals();
+        let (dr, dw) = if dt > 0.0 {
+            (
+                dnow.0.saturating_sub(self.disk_prev.0) as f64 / dt,
+                dnow.1.saturating_sub(self.disk_prev.1) as f64 / dt,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        self.disk_prev = dnow;
+        let root = self
+            .disks
+            .iter()
+            .find(|d| d.mount_point() == std::path::Path::new("/"))
+            .or_else(|| self.disks.iter().max_by_key(|d| d.total_space()));
+        let (disk_total, disk_used) = root
+            .map(|d| (d.total_space(), d.total_space().saturating_sub(d.available_space())))
+            .unwrap_or((0, 0));
+        let gpus = self.gpu.latest();
 
         let mem_total = self.sys.total_memory();
         let mt = mem_total.max(1) as f32;
@@ -220,6 +273,12 @@ impl Monitor {
         self.stats = Stats {
             host: System::host_name().unwrap_or_else(|| "sistema".into()),
             cpu_brand: cpus.first().map(|c| c.brand().trim().to_string()).unwrap_or_default(),
+            cpu_model: short_cpu_name(cpus.first().map(|c| c.brand()).unwrap_or("")),
+            cpu_freq: if cpus.is_empty() {
+                0
+            } else {
+                cpus.iter().map(|c| c.frequency()).sum::<u64>() / cpus.len() as u64
+            },
             cores: cpus.iter().map(|c| c.cpu_usage()).collect(),
             cpu_total: self.sys.global_cpu_usage(),
             mem_total,
@@ -236,6 +295,11 @@ impl Monitor {
                 .filter_map(|c| c.temperature())
                 .filter(|t| t.is_finite())
                 .reduce(f32::max),
+            disk_read_rate: dr,
+            disk_write_rate: dw,
+            disk_used,
+            disk_total,
+            gpus,
             tasks: self.procs.len(),
             running: self.procs.iter().filter(|p| p.state == State::Run).count(),
         };
@@ -244,6 +308,15 @@ impl Monitor {
         push(&mut self.mem_hist, self.stats.mem_pct());
         push(&mut self.rx_hist, rx_rate);
         push(&mut self.tx_hist, tx_rate);
+        push(&mut self.disk_r_hist, dr);
+        push(&mut self.disk_w_hist, dw);
+        let n = self.stats.gpus.len();
+        self.gpu_hist.resize_with(n, VecDeque::new);
+        self.vram_hist.resize_with(n, VecDeque::new);
+        for (i, g) in self.stats.gpus.iter().enumerate() {
+            push(&mut self.gpu_hist[i], g.busy.unwrap_or(0.0));
+            push(&mut self.vram_hist[i], g.vram_pct());
+        }
     }
 
     /// Procesos filtrados y ordenados (índices sobre `self.procs`).
@@ -290,6 +363,38 @@ impl Monitor {
 impl Default for Monitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// "AMD Ryzen 7 7445HS w/ Radeon 740M Graphics" -> "Ryzen 7 7445HS"
+/// "Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz" -> "Core i7-10750H"
+pub fn short_cpu_name(brand: &str) -> String {
+    let mut s = brand.to_string();
+    for cut in [" w/ ", " with ", " CPU @", " @ "] {
+        if let Some(i) = s.find(cut) {
+            s.truncate(i);
+        }
+    }
+    for junk in ["(R)", "(TM)", "(tm)", "AMD ", "Intel ", " Processor", " CPU", "-Core", " Core Processor"] {
+        s = s.replace(junk, "");
+    }
+    // "Ryzen 7 7840HS 8" (cores al final) -> fuera
+    let mut w: Vec<&str> = s.split_whitespace().collect();
+    if w.len() > 3 && w.last().is_some_and(|t| t.len() <= 3 && t.chars().all(|c| c.is_ascii_digit())) {
+        w.pop();
+    }
+    let s = w.join(" ");
+    if s.is_empty() { brand.trim().to_string() } else { s }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_cpu_name;
+    #[test]
+    fn cpu_names() {
+        assert_eq!(short_cpu_name("AMD Ryzen 7 7445HS w/ Radeon 740M Graphics"), "Ryzen 7 7445HS");
+        assert_eq!(short_cpu_name("Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz"), "Core i7-10750H");
+        assert_eq!(short_cpu_name("AMD Ryzen 9 5900X 12-Core Processor"), "Ryzen 9 5900X");
     }
 }
 

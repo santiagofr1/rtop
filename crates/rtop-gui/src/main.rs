@@ -4,12 +4,24 @@ use eframe::egui::{
     self, Align, Color32, CornerRadius, FontId, Layout, RichText, Sense, Stroke, Ui, Vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{HoverPosition, Line, Plot, PlotPoints};
 use rtop_core::{
     config::THEMES,
     fmt::{hms, human},
     Config, Monitor, Rgb, SortBy, State, Theme,
 };
+
+/// muestras visibles en los gráficos
+const WINDOW: usize = 120;
+const PLOT_H: f32 = 90.0;
+
+fn pct_fmt(v: f64) -> String {
+    format!("{v:.0}%")
+}
+
+fn rate_fmt(v: f64) -> String {
+    if v <= 0.0 { "0".into() } else { format!("{}/s", human(v as u64)) }
+}
 
 fn c(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
@@ -30,6 +42,8 @@ struct App {
     last: Instant,
     flash: Option<(String, Instant)>,
     visuals_for: Option<Theme>,
+    started: Instant,
+    shot_requested: bool,
 }
 
 impl App {
@@ -50,6 +64,8 @@ impl App {
             last: Instant::now(),
             flash: None,
             visuals_for: None,
+            started: Instant::now(),
+            shot_requested: false,
         };
         a.rebuild();
         a
@@ -107,157 +123,355 @@ impl App {
 
     // ---------- secciones ----------
 
-    fn card<R>(&self, ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    fn card<R>(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         egui::Frame::new()
             .fill(c(self.th.panel))
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(10.0)
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(14, 12))
             .show(ui, |ui| {
-                ui.label(RichText::new(title).color(c(self.th.accent)).strong());
-                ui.add_space(4.0);
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 4.0;
                 add(ui)
             })
             .inner
     }
 
-    fn bar(&self, ui: &mut Ui, label: &str, pct: f32, text: &str, width: f32) {
-        let th = &self.th;
-        let h = 16.0;
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
-        let p = ui.painter();
-        let lw = 34.0;
-        p.text(
-            rect.left_center(),
-            egui::Align2::LEFT_CENTER,
-            label,
-            FontId::monospace(12.0),
-            c(th.accent),
-        );
-        let track = egui::Rect::from_min_max(rect.min + Vec2::new(lw, 2.0), rect.max - Vec2::new(0.0, 2.0));
-        p.rect_filled(track, CornerRadius::same(4), c(th.sel));
-        let mut fill = track;
-        fill.set_width(track.width() * (pct.clamp(0.0, 100.0) / 100.0));
-        p.rect_filled(fill, CornerRadius::same(4), c(th.heat(pct)));
-        p.text(
-            track.right_center() - Vec2::new(6.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            text,
-            FontId::monospace(11.0),
-            c(th.text),
-        );
+    fn caption(&self, t: &str) -> RichText {
+        RichText::new(t.to_uppercase()).color(c(self.th.dim)).size(11.0).strong()
     }
 
-    fn header(&self, ui: &mut Ui) {
+    /// Bloque CPU: el uso es lo protagonista, el modelo va chiquito.
+    fn cpu_hero(&self, ui: &mut Ui) {
         let s = &self.mon.stats;
-        let total_w = ui.available_width();
-        ui.horizontal_top(|ui| {
-            let cpu_w = (total_w * 0.6).max(300.0);
-            ui.allocate_ui(Vec2::new(cpu_w, 0.0), |ui| {
-                self.card(ui, &format!("CPU  {}", s.cpu_brand), |ui| {
-                    let cols = if s.cores.len() > 16 { 4 } else { 2 };
-                    let col_w = (ui.available_width() - 12.0 * (cols as f32 - 1.0)) / cols as f32;
-                    let per_col = s.cores.len().div_ceil(cols).max(1);
-                    ui.horizontal_top(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        for ci in 0..cols {
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 3.0;
-                                for (i, &u) in s.cores.iter().enumerate().skip(ci * per_col).take(per_col) {
-                                    self.bar(ui, &format!("{i:>2}"), u, &format!("{u:.1}%"), col_w);
-                                }
-                            });
-                        }
-                    });
+        let th = &self.th;
+        self.card(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(Vec2::new(150.0, 0.0), Layout::top_down(Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(self.caption("CPU"));
+                    ui.label(
+                        RichText::new(format!("{:.0}%", s.cpu_total))
+                            .size(40.0)
+                            .strong()
+                            .color(c(th.heat(s.cpu_total))),
+                    );
+                    ui.label(RichText::new(&s.cpu_model).color(c(th.dim)).size(12.0))
+                        .on_hover_text(&s.cpu_brand);
+                    let mut extra = format!("{} hilos · {:.1} GHz", s.cores.len(), s.cpu_freq as f32 / 1000.0);
+                    if let Some(t) = s.temp_max {
+                        extra.push_str(&format!(" · {t:.0}°C"));
+                    }
+                    ui.label(RichText::new(extra).color(c(th.dim)).size(12.0));
                 });
-            });
-            ui.vertical(|ui| {
-                self.card(ui, &s.host, |ui| {
-                    let w = ui.available_width();
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    self.bar(ui, "Mem", s.mem_pct(), &format!("{}/{}", human(s.mem_used), human(s.mem_total)), w);
-                    self.bar(ui, "Swp", s.swap_pct(), &format!("{}/{}", human(s.swap_used), human(s.swap_total)), w);
-                    ui.add_space(4.0);
-                    let th = &self.th;
-                    let load_pct = s.load.0 as f32 * 100.0 / s.cores.len().max(1) as f32;
-                    egui::Grid::new("info").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
-                        let k = |ui: &mut Ui, t: &str| {
-                            ui.label(RichText::new(t).color(c(th.accent)).strong());
-                        };
-                        k(ui, "Carga");
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{:.2}", s.load.0)).color(c(th.heat(load_pct))).strong());
-                            ui.label(format!("{:.2} {:.2}", s.load.1, s.load.2));
-                        });
-                        ui.end_row();
-                        k(ui, "Tareas");
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{}", s.tasks));
-                            ui.label(RichText::new(format!("{} corriendo", s.running)).color(c(th.ok)));
-                        });
-                        ui.end_row();
-                        k(ui, "Uptime");
-                        ui.label(hms(s.uptime));
-                        ui.end_row();
-                        k(ui, "Red");
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("v {}/s", human(s.rx_rate as u64))).color(c(th.ok)));
-                            ui.label(RichText::new(format!("^ {}/s", human(s.tx_rate as u64))).color(c(th.warn)));
-                        });
-                        ui.end_row();
-                        if let Some(t) = s.temp_max {
-                            k(ui, "Temp");
-                            ui.label(RichText::new(format!("{t:.0}°C max")).color(c(th.heat(t))).strong());
-                            ui.end_row();
-                        }
-                    });
-                });
+                ui.add_space(8.0);
+                self.core_tiles(ui, ui.available_width());
             });
         });
     }
 
-    fn graphs(&self, ui: &mut Ui) {
+    fn core_tiles(&self, ui: &mut Ui, width: f32) {
         let th = &self.th;
-        let w = (ui.available_width() - 8.0) / 2.0;
-        ui.horizontal(|ui| {
-            for (id, hist, title, color) in [
-                ("cpu", &self.mon.cpu_hist, "CPU total", th.accent),
-                ("mem", &self.mon.mem_hist, "Memoria", th.mem),
-            ] {
-                ui.allocate_ui(Vec2::new(w, 120.0), |ui| {
-                    let last = hist.back().copied().unwrap_or(0.0);
-                    self.card(ui, &format!("{title}  {last:.0}%"), |ui| {
-                        let n = hist.len();
-                        let pts: PlotPoints = hist
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &v)| [i as f64 - n as f64, v as f64])
-                            .collect::<Vec<_>>()
-                            .into();
-                        Plot::new(id)
-                            .height(80.0)
-                            .include_y(0.0)
-                            .include_y(100.0)
-                            .include_x(-(rtop_core::HIST as f64))
-                            .include_x(0.0)
-                            .show_axes([false, true])
-                            .show_background(false)
-                            .allow_drag(false)
-                            .allow_zoom(false)
-                            .allow_scroll(false)
-                            .allow_boxed_zoom(false)
-                            .allow_double_click_reset(false)
-                            .show(ui, |p| {
-                                p.line(Line::new(title, pts).color(c(color)).fill(0.0).width(1.5));
-                            });
-                    });
-                });
+        let cores = &self.mon.stats.cores;
+        let n = cores.len().max(1);
+        let per_row = n.min(16);
+        let rows = n.div_ceil(per_row);
+        let gap = 6.0;
+        let tile_w = (width - gap * (per_row as f32 - 1.0)) / per_row as f32;
+        let tile_h = if rows == 1 { 96.0 } else { 56.0 };
+        let (rect, resp) = ui.allocate_exact_size(
+            Vec2::new(width, rows as f32 * tile_h + (rows as f32 - 1.0) * gap),
+            Sense::hover(),
+        );
+        let p = ui.painter_at(rect);
+        let mut hovered = None;
+        for (i, &u) in cores.iter().enumerate() {
+            let (r, col) = (i / per_row, i % per_row);
+            let min = rect.min + Vec2::new(col as f32 * (tile_w + gap), r as f32 * (tile_h + gap));
+            let tile = egui::Rect::from_min_size(min, Vec2::new(tile_w, tile_h));
+            let rad = CornerRadius::same(6);
+            p.rect_filled(tile, rad, c(th.sel));
+            let frac = (u / 100.0).clamp(0.0, 1.0);
+            if frac > 0.0 {
+                let mut fill = tile;
+                fill.set_top(tile.bottom() - tile_h * frac);
+                p.rect_filled(fill, rad, c(th.heat(u)).gamma_multiply(0.85));
             }
+            p.text(
+                tile.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{u:.0}%"),
+                FontId::proportional(if rows == 1 { 18.0 } else { 13.0 }),
+                c(th.text),
+            );
+            p.text(
+                tile.left_top() + Vec2::new(6.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                format!("{i}"),
+                FontId::monospace(10.0),
+                c(th.dim),
+            );
+            if resp.hover_pos().is_some_and(|h| tile.contains(h)) {
+                hovered = Some((i, u));
+            }
+        }
+        if let Some((i, u)) = hovered {
+            resp.on_hover_text(format!("núcleo {i}: {u:.1}%"));
+        }
+    }
+
+    /// Tarjeta con título, valor grande, subtítulo y gráfico.
+    #[allow(clippy::too_many_arguments)]
+    fn metric(
+        &self,
+        ui: &mut Ui,
+        id: &str,
+        title: &str,
+        value: RichText,
+        sub: Vec<RichText>,
+        series: Vec<(String, Vec<f64>, Color32)>,
+        fmt_y: fn(f64) -> String,
+        percent: bool,
+    ) {
+        self.card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(self.caption(title));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(value);
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                for s in sub {
+                    ui.label(s.size(12.0));
+                }
+            });
+            let step = self.cfg.refresh_ms() as f64 / 1000.0;
+            let window = WINDOW as f64 * step;
+            let mut plot = Plot::new(id)
+                .height(PLOT_H)
+                .include_x(-window)
+                .include_x(0.0)
+                .include_y(0.0)
+                .show_axes([false, true])
+                .show_grid([false, true])
+                .show_background(false)
+                .y_axis_min_width(46.0)
+                .y_axis_formatter(move |m, _| fmt_y(m.value))
+                .label_formatter(move |hp| match hp {
+                    HoverPosition::NearDataPoint { plot_name, position, .. } => {
+                        Some(format!("{plot_name}: {}\nhace {:.0}s", fmt_y(position.y), -position.x))
+                    }
+                    _ => None,
+                })
+                .allow_drag(false)
+                .allow_zoom(false)
+                .allow_scroll(false)
+                .allow_boxed_zoom(false)
+                .allow_double_click_reset(false)
+                .set_margin_fraction(Vec2::new(0.0, 0.08));
+            if percent {
+                plot = plot.include_y(100.0);
+            }
+            plot.show(ui, |p| {
+                for (name, data, col) in series {
+                    let n = data.len();
+                    let pts: PlotPoints = data
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &v)| [(i as f64 - (n as f64 - 1.0)) * step, v])
+                        .collect::<Vec<_>>()
+                        .into();
+                    p.line(Line::new(name, pts).color(col).width(1.8).fill(0.0).fill_alpha(0.18));
+                }
+            });
         });
+    }
+
+    fn metrics(&self, ui: &mut Ui) {
+        let s = &self.mon.stats;
+        let th = &self.th;
+        let m = &self.mon;
+        let big = |t: String, col: Rgb| RichText::new(t).size(20.0).strong().color(c(col));
+        let dim = |t: String| RichText::new(t).color(c(th.dim));
+        let tag = |t: String, col: Rgb| RichText::new(t).color(c(col));
+        let last = |q: &std::collections::VecDeque<f32>| -> Vec<f64> {
+            q.iter().rev().take(WINDOW).rev().map(|&v| v as f64).collect()
+        };
+        let last64 = |q: &std::collections::VecDeque<f64>| -> Vec<f64> {
+            q.iter().rev().take(WINDOW).rev().copied().collect()
+        };
+        let gpu_cols = [th.accent, th.mem, th.ok, th.warn];
+
+        let cols = if ui.available_width() > 1100.0 { 3 } else { 2 };
+        let gap = 10.0;
+        let card_w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
+
+        let mut cards: Vec<Box<dyn FnOnce(&mut Ui) + '_>> = vec![];
+
+        cards.push(Box::new(move |ui| {
+            self.metric(
+                ui,
+                "cpu",
+                "CPU",
+                big(format!("{:.0}%", s.cpu_total), th.heat(s.cpu_total)),
+                vec![
+                    dim(format!("carga {:.2} {:.2} {:.2}", s.load.0, s.load.1, s.load.2)),
+                    dim(format!("{} tareas", s.tasks)),
+                ],
+                vec![("CPU".into(), last(&m.cpu_hist), c(th.accent))],
+                pct_fmt,
+                true,
+            )
+        }));
+        cards.push(Box::new(move |ui| {
+            self.metric(
+                ui,
+                "mem",
+                "Memoria",
+                big(format!("{:.0}%", s.mem_pct()), th.heat(s.mem_pct())),
+                vec![
+                    dim(format!("{} / {}", human(s.mem_used), human(s.mem_total))),
+                    dim(format!("swap {} / {}", human(s.swap_used), human(s.swap_total))),
+                ],
+                vec![("RAM".into(), last(&m.mem_hist), c(th.mem))],
+                pct_fmt,
+                true,
+            )
+        }));
+        cards.push(Box::new(move |ui| {
+            self.metric(
+                ui,
+                "net",
+                "Red",
+                big(format!("{}/s", human((s.rx_rate + s.tx_rate) as u64)), th.text),
+                vec![
+                    tag(format!("bajada {}/s", human(s.rx_rate as u64)), th.ok),
+                    tag(format!("subida {}/s", human(s.tx_rate as u64)), th.warn),
+                ],
+                vec![
+                    ("bajada".into(), last64(&m.rx_hist), c(th.ok)),
+                    ("subida".into(), last64(&m.tx_hist), c(th.warn)),
+                ],
+                rate_fmt,
+                false,
+            )
+        }));
+        cards.push(Box::new(move |ui| {
+            self.metric(
+                ui,
+                "disk",
+                "Disco",
+                big(format!("{}/s", human((s.disk_read_rate + s.disk_write_rate) as u64)), th.text),
+                vec![
+                    tag(format!("lectura {}/s", human(s.disk_read_rate as u64)), th.accent),
+                    tag(format!("escritura {}/s", human(s.disk_write_rate as u64)), th.mem),
+                    dim(format!("/ {} de {} ({:.0}%)", human(s.disk_used), human(s.disk_total), s.disk_pct())),
+                ],
+                vec![
+                    ("lectura".into(), last64(&m.disk_r_hist), c(th.accent)),
+                    ("escritura".into(), last64(&m.disk_w_hist), c(th.mem)),
+                ],
+                rate_fmt,
+                false,
+            )
+        }));
+        cards.push(Box::new(move |ui| {
+            let g0 = s.gpus.iter().find(|g| !g.asleep);
+            let v = g0.and_then(|g| g.busy).unwrap_or(0.0);
+            let sub = s
+                .gpus
+                .iter()
+                .enumerate()
+                .map(|(i, g)| {
+                    let col = gpu_cols[i % gpu_cols.len()];
+                    if g.asleep {
+                        return tag(format!("{} dormida", g.short_name()), th.dim);
+                    }
+                    let mut t = format!("{} {:.0}%", g.short_name(), g.busy.unwrap_or(0.0));
+                    if let Some(x) = g.temp {
+                        t.push_str(&format!(" {x:.0}°C"));
+                    }
+                    if let Some(w) = g.power_w {
+                        t.push_str(&format!(" {w:.1}W"));
+                    }
+                    tag(t, col)
+                })
+                .collect::<Vec<_>>();
+            let series = s
+                .gpus
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (g.short_name(), last(&m.gpu_hist[i]), c(gpu_cols[i % gpu_cols.len()])))
+                .collect();
+            self.metric(
+                ui,
+                "gpu",
+                "GPU",
+                big(if s.gpus.is_empty() { "-".into() } else { format!("{v:.0}%") }, th.heat(v)),
+                if sub.is_empty() { vec![dim("no se detectó GPU".into())] } else { sub },
+                series,
+                pct_fmt,
+                true,
+            )
+        }));
+        cards.push(Box::new(move |ui| {
+            let g0 = s.gpus.iter().find(|g| !g.asleep && g.vram_total > 0);
+            let sub = s
+                .gpus
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| !g.asleep && g.vram_total > 0)
+                .map(|(i, g)| {
+                    let mut t = format!("{} {} / {}", g.short_name(), human(g.vram_used), human(g.vram_total));
+                    if g.shared_total > 0 {
+                        t.push_str(&format!(" (+{} compartida)", human(g.shared_used)));
+                    }
+                    tag(t, gpu_cols[i % gpu_cols.len()])
+                })
+                .collect::<Vec<_>>();
+            let series = s
+                .gpus
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| !g.asleep)
+                .map(|(i, g)| (g.short_name(), last(&m.vram_hist[i]), c(gpu_cols[i % gpu_cols.len()])))
+                .collect();
+            self.metric(
+                ui,
+                "vram",
+                "VRAM",
+                match g0 {
+                    Some(g) => big(format!("{:.0}%", g.vram_pct()), th.heat(g.vram_pct())),
+                    None => big("-".into(), th.dim),
+                },
+                if sub.is_empty() { vec![dim("sin datos de VRAM".into())] } else { sub },
+                series,
+                pct_fmt,
+                true,
+            )
+        }));
+
+        let mut it = cards.into_iter().peekable();
+        while it.peek().is_some() {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for _ in 0..cols {
+                    if let Some(f) = it.next() {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(card_w, 0.0),
+                            Layout::top_down(Align::Min),
+                            |ui| f(ui),
+                        );
+                    }
+                }
+            });
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Filtrar").color(c(self.th.accent)).strong());
+            ui.label(self.caption("Procesos"));
+            ui.add_space(6.0);
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
                     .hint_text("nombre, comando, usuario o pid")
@@ -533,6 +747,34 @@ impl App {
     }
 }
 
+impl App {
+    /// `RTOP_SHOT=/ruta.ppm rtop-gui`: se saca una captura a los 4 s y se cierra.
+    fn debug_shot(&mut self, ctx: &egui::Context) {
+        let Some(path) = std::env::var_os("RTOP_SHOT") else { return };
+        let delay = std::env::var("RTOP_SHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+        if !self.shot_requested && self.started.elapsed() > Duration::from_secs(delay) {
+            self.shot_requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        ctx.request_repaint_after(Duration::from_millis(200));
+        let img = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = img {
+            let [w, h] = img.size;
+            let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+            for px in &img.pixels {
+                out.extend_from_slice(&[px.r(), px.g(), px.b()]);
+            }
+            let _ = std::fs::write(path, out);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -553,17 +795,27 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(c(self.th.bg)).inner_margin(10.0))
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                self.header(ui);
+                ui.spacing_mut().item_spacing = Vec2::new(10.0, 10.0);
+                self.cpu_hero(ui);
                 if self.cfg.show_graphs {
-                    self.graphs(ui);
+                    self.metrics(ui);
                 }
-                self.toolbar(ui);
-                self.table(ui);
+                egui::Frame::new()
+                    .fill(c(self.th.panel))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.set_min_height(ui.available_height());
+                        self.toolbar(ui);
+                        ui.add_space(4.0);
+                        self.table(ui);
+                    });
             });
 
         self.settings(&ctx);
         self.confirm(&ctx);
+        self.debug_shot(&ctx);
     }
 }
 
@@ -572,8 +824,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("rtop")
             .with_app_id("rtop")
-            .with_inner_size([1200.0, 820.0])
-            .with_min_inner_size([800.0, 500.0]),
+            .with_inner_size([1360.0, 960.0])
+            .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native("rtop", opts, Box::new(|_cc| Ok(Box::new(App::new()))))

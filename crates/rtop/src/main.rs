@@ -260,8 +260,9 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let ncpu = app.mon.stats.cores.len();
     let cols = if ncpu > 16 { 4 } else { 2 };
-    let header_h = (ncpu.div_ceil(cols) as u16).max(7) + 2;
-    let graphs_h = if app.cfg.show_graphs { 5 } else { 0 };
+    let info_lines = 8 + app.mon.stats.gpus.len() as u16;
+    let header_h = (ncpu.div_ceil(cols) as u16).max(info_lines) + 2;
+    let graphs_h = if app.cfg.show_graphs { 10 } else { 0 };
 
     let [header, graphs, body, footer] = Layout::vertical([
         Constraint::Length(header_h),
@@ -291,7 +292,21 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, cols: usize) {
     let [cpu_a, info_a] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
 
-    let b = block(th, &format!("CPU  {}", s.cpu_brand));
+    let b = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(c(th.dim)))
+        .title(Line::from(vec![
+            Span::styled(" CPU ", Style::default().fg(c(th.accent)).bold()),
+            Span::styled(format!("{:.0}% ", s.cpu_total), Style::default().fg(c(th.heat(s.cpu_total))).bold()),
+        ]))
+        .title(
+            Line::from(Span::styled(
+                format!(" {} · {} hilos · {:.1} GHz ", s.cpu_model, s.cores.len(), s.cpu_freq as f32 / 1000.0),
+                Style::default().fg(c(th.dim)),
+            ))
+            .right_aligned(),
+        );
     let inner = b.inner(cpu_a);
     f.render_widget(b, cpu_a);
     let col_areas = Layout::horizontal(vec![Constraint::Ratio(1, cols as u32); cols]).split(inner);
@@ -306,6 +321,14 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, cols: usize) {
             .map(|(i, &u)| bar_line(th, &format!("{i:>2}"), u, ca.width, &format!("{u:.1}%")))
             .collect();
         f.render_widget(Paragraph::new(lines), *ca);
+    }
+    // si sobra lugar abajo, barra de uso total a todo lo ancho
+    if inner.height as usize > per_col + 1 {
+        let r = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+        f.render_widget(
+            Paragraph::new(bar_line(th, "Tot", s.cpu_total, r.width, &format!("{:.1}%", s.cpu_total))),
+            r,
+        );
     }
 
     let b = block(th, &s.host);
@@ -335,6 +358,30 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, cols: usize) {
             Span::styled(format!("^ {}/s", human(s.tx_rate as u64)), Style::default().fg(c(th.warn))),
         ]),
     ];
+    lines.push(Line::from(vec![
+        k("Disco"),
+        Span::styled(format!("r {}/s ", human(s.disk_read_rate as u64)), Style::default().fg(c(th.accent))),
+        Span::styled(format!("w {}/s ", human(s.disk_write_rate as u64)), Style::default().fg(c(th.mem))),
+        Span::styled(format!("({:.0}% usado)", s.disk_pct()), Style::default().fg(c(th.dim))),
+    ]));
+    for g in &s.gpus {
+        let mut sp = vec![k("GPU")];
+        sp.push(Span::styled(format!("{} ", g.short_name()), Style::default().fg(c(th.text))));
+        if g.asleep {
+            sp.push(Span::styled("dormida", Style::default().fg(c(th.dim))));
+        } else {
+            let b = g.busy.unwrap_or(0.0);
+            sp.push(Span::styled(format!("{b:.0}% "), Style::default().fg(c(th.heat(b))).bold()));
+            sp.push(Span::styled(
+                format!("vram {}/{}", human(g.vram_used), human(g.vram_total)),
+                Style::default().fg(c(th.dim)),
+            ));
+            if let Some(t) = g.temp {
+                sp.push(Span::styled(format!(" {t:.0}°C"), Style::default().fg(c(th.dim))));
+            }
+        }
+        lines.push(Line::from(sp));
+    }
     if let Some(t) = s.temp_max {
         lines.push(Line::from(vec![
             k("Temp"),
@@ -346,18 +393,45 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, cols: usize) {
 
 fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.th;
-    let [a, b] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-    for (rect, hist, title, color) in [
-        (a, &app.mon.cpu_hist, "CPU total", th.accent),
-        (b, &app.mon.mem_hist, "Memoria", th.mem),
-    ] {
-        let blk = block(th, &format!("{title} {:.0}%", hist.back().copied().unwrap_or(0.0)));
+    let m = &app.mon;
+    let s = &m.stats;
+    let rows = Layout::vertical([Constraint::Ratio(1, 2); 2]).split(area);
+    let top = Layout::horizontal([Constraint::Ratio(1, 3); 3]).split(rows[0]);
+    let bot = Layout::horizontal([Constraint::Ratio(1, 3); 3]).split(rows[1]);
+
+    let pct = |q: &std::collections::VecDeque<f32>| q.iter().map(|&v| v as u64).collect::<Vec<u64>>();
+    let sum = |a: &std::collections::VecDeque<f64>, b: &std::collections::VecDeque<f64>| {
+        a.iter().zip(b.iter()).map(|(x, y)| (x + y) as u64).collect::<Vec<u64>>()
+    };
+    let gpu_i = s.gpus.iter().position(|g| !g.asleep);
+    let empty = std::collections::VecDeque::new();
+    let gh = gpu_i.map(|i| &m.gpu_hist[i]).unwrap_or(&empty);
+    let vh = gpu_i.map(|i| &m.vram_hist[i]).unwrap_or(&empty);
+    let g = gpu_i.map(|i| &s.gpus[i]);
+
+    let items: [(Rect, String, Vec<u64>, Option<u64>, Rgb); 6] = [
+        (top[0], format!("CPU {:.0}%", s.cpu_total), pct(&m.cpu_hist), Some(100), th.accent),
+        (top[1], format!("Memoria {:.0}%  {}/{}", s.mem_pct(), human(s.mem_used), human(s.mem_total)), pct(&m.mem_hist), Some(100), th.mem),
+        (top[2], format!("Red v{}/s ^{}/s", human(s.rx_rate as u64), human(s.tx_rate as u64)), sum(&m.rx_hist, &m.tx_hist), None, th.ok),
+        (bot[0], format!("Disco r{}/s w{}/s", human(s.disk_read_rate as u64), human(s.disk_write_rate as u64)), sum(&m.disk_r_hist, &m.disk_w_hist), None, th.warn),
+        (bot[1], match g {
+            Some(g) => format!("GPU {} {:.0}%", g.short_name(), g.busy.unwrap_or(0.0)),
+            None => "GPU -".into(),
+        }, pct(gh), Some(100), th.accent),
+        (bot[2], match g {
+            Some(g) => format!("VRAM {}/{}", human(g.vram_used), human(g.vram_total)),
+            None => "VRAM -".into(),
+        }, pct(vh), Some(100), th.mem),
+    ];
+    for (rect, title, data, max, color) in items {
+        let blk = block(th, &title);
         let w = blk.inner(rect).width as usize;
-        let data: Vec<u64> = hist.iter().rev().take(w).rev().map(|&x| x as u64).collect();
-        f.render_widget(
-            Sparkline::default().block(blk).data(&data).max(100).style(Style::default().fg(c(color))),
-            rect,
-        );
+        let data: Vec<u64> = data.iter().rev().take(w).rev().copied().collect();
+        let mut sp = Sparkline::default().block(blk).data(&data).style(Style::default().fg(c(color)));
+        if let Some(mx) = max {
+            sp = sp.max(mx);
+        }
+        f.render_widget(sp, rect);
     }
 }
 
@@ -592,6 +666,27 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::
                 app.refresh();
             }
             last_tick = Instant::now();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// `cargo test -p rtop -- --nocapture` dibuja un frame en texto.
+    #[test]
+    fn render_frame() {
+        let mut app = App::new();
+        std::thread::sleep(Duration::from_millis(1100));
+        app.refresh();
+        let mut term = Terminal::new(TestBackend::new(150, 48)).unwrap();
+        term.draw(|f| ui(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            println!("{line}");
         }
     }
 }
