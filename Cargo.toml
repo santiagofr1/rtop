@@ -1,9 +1,7 @@
-[package]
-name = "rtop"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["crates/rtop-core", "crates/rtop", "crates/rtop-gui"]
 
-[dependencies]
-crossterm = "0.28"
-ratatui = "0.29"
-sysinfo = "0.33"
+[profile.release]
+opt-level = 3
+lto = "thin"

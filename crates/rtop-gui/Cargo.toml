@@ -1,0 +1,10 @@
+[package]
+name = "rtop-gui"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.35.0"
+egui_extras = "0.35.0"
+egui_plot = "0.36.0"
+rtop-core = { version = "0.2.0", path = "../rtop-core" }
