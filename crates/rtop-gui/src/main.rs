@@ -1,10 +1,16 @@
-use std::time::{Duration, Instant};
+mod kit;
+mod pages;
+
+use std::{
+    cell::{Cell, RefCell},
+    time::{Duration, Instant},
+};
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontId, Layout, RichText, Sense, Stroke, Ui, Vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
 use egui_extras::{Column, TableBuilder};
-use egui_plot::{HoverPosition, Line, Plot, PlotPoints};
+use kit::{c, caption, paint_meter, paint_spark, tail_f32, tail_f64, Grad};
 use rtop_core::{
     config::THEMES,
     fmt::{hms, human},
@@ -12,31 +18,34 @@ use rtop_core::{
 };
 
 /// muestras visibles en los gráficos
-const WINDOW: usize = 120;
-const PLOT_H: f32 = 90.0;
+pub const WINDOW: usize = 150;
 
-fn pct_fmt(v: f64) -> String {
-    format!("{v:.0}%")
-}
-
-fn rate_fmt(v: f64) -> String {
-    if v <= 0.0 { "0".into() } else { format!("{}/s", human(v as u64)) }
-}
-
-fn c(rgb: Rgb) -> Color32 {
-    Color32::from_rgb(rgb.0, rgb.1, rgb.2)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
+    Overview,
+    Cpu,
+    Mem,
+    Gpu(usize),
+    Net,
+    Disk,
+    Sensors,
+    Procs,
 }
 
 struct App {
     mon: Monitor,
     cfg: Config,
     th: Theme,
+    page: Page,
     view: Vec<usize>,
     sort: SortBy,
     reverse: bool,
     filter: String,
     selected: Option<u32>,
     confirm_kill: Option<(u32, String)>,
+    /// pedidos desde páginas que no tienen `&mut self`
+    kill_req: RefCell<Option<(u32, String)>>,
+    goto: Cell<Option<Page>>,
     show_settings: bool,
     paused: bool,
     last: Instant,
@@ -49,16 +58,30 @@ struct App {
 impl App {
     fn new() -> Self {
         let cfg = Config::load();
+        let page = match std::env::var("RTOP_PAGE").as_deref() {
+            Ok("cpu") => Page::Cpu,
+            Ok("mem") => Page::Mem,
+            Ok("gpu0") => Page::Gpu(0),
+            Ok("gpu1") => Page::Gpu(1),
+            Ok("net") => Page::Net,
+            Ok("disk") => Page::Disk,
+            Ok("sensors") => Page::Sensors,
+            Ok("procs") => Page::Procs,
+            _ => Page::Overview,
+        };
         let mut a = App {
             mon: Monitor::new(),
             th: cfg.theme(),
             cfg,
+            page,
             view: vec![],
             sort: SortBy::Cpu,
             reverse: false,
             filter: String::new(),
             selected: None,
             confirm_kill: None,
+            kill_req: RefCell::new(None),
+            goto: Cell::new(None),
             show_settings: false,
             paused: false,
             last: Instant::now(),
@@ -87,8 +110,8 @@ impl App {
         let mut v = egui::Visuals::dark();
         v.panel_fill = c(th.bg);
         v.window_fill = c(th.panel);
-        v.extreme_bg_color = c(th.panel);
-        v.faint_bg_color = c(th.panel);
+        v.extreme_bg_color = c(th.bg);
+        v.faint_bg_color = kit_blend(th.panel, th.sel);
         v.override_text_color = Some(c(th.text));
         v.selection.bg_fill = c(th.sel);
         v.selection.stroke = Stroke::new(1.0, c(th.accent));
@@ -121,361 +144,195 @@ impl App {
         self.rebuild();
     }
 
-    // ---------- secciones ----------
+    // ---------- barra lateral ----------
 
-    fn card<R>(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    fn nav(&mut self, ui: &mut Ui) {
+        let th = self.th.clone();
+        let s = &self.mon.stats;
+        let m = &self.mon;
+        struct Item {
+            page: Page,
+            title: String,
+            value: String,
+            pct: Option<f32>,
+            spark: Vec<f32>,
+            spark_max: Option<f32>,
+            grad: Grad,
+        }
+        let mut items = vec![
+            Item {
+                page: Page::Overview,
+                title: "Resumen".into(),
+                value: s.host.clone(),
+                pct: None,
+                spark: vec![],
+                spark_max: None,
+                grad: Grad::Heat,
+            },
+            Item {
+                page: Page::Cpu,
+                title: "CPU".into(),
+                value: format!("{:.0}%", s.cpu_total),
+                pct: Some(s.cpu_total),
+                spark: tail_f32(&m.cpu_hist, 60),
+                spark_max: Some(100.0),
+                grad: Grad::Heat,
+            },
+            Item {
+                page: Page::Mem,
+                title: "Memoria".into(),
+                value: format!("{} / {}", human(s.mem_used), human(s.mem_total)),
+                pct: Some(s.mem_pct()),
+                spark: tail_f32(&m.mem_hist, 60),
+                spark_max: Some(100.0),
+                grad: Grad::Mono(th.mem),
+            },
+        ];
+        for (i, g) in s.gpus.iter().enumerate() {
+            items.push(Item {
+                page: Page::Gpu(i),
+                title: format!("GPU {} · {}", i + 1, g.short_name()),
+                value: if g.asleep { "dormida".into() } else { format!("{:.0}%", g.busy.unwrap_or(0.0)) },
+                pct: if g.asleep { None } else { g.busy },
+                spark: m.gpu_hist.get(i).map(|h| tail_f32(h, 60)).unwrap_or_default(),
+                spark_max: Some(100.0),
+                grad: Grad::Heat,
+            });
+        }
+        items.push(Item {
+            page: Page::Net,
+            title: "Red".into(),
+            value: format!("v {}/s", human(s.rx_rate as u64)),
+            pct: None,
+            spark: tail_f64(&m.rx_hist, 60),
+            spark_max: None,
+            grad: Grad::Mono(th.ok),
+        });
+        items.push(Item {
+            page: Page::Disk,
+            title: "Disco".into(),
+            value: format!("{}/s", human((s.disk_read_rate + s.disk_write_rate) as u64)),
+            pct: None,
+            spark: m.disk_r_hist.iter().zip(&m.disk_w_hist).rev().take(60).rev().map(|(a, b)| (a + b) as f32).collect(),
+            spark_max: None,
+            grad: Grad::Mono(th.accent),
+        });
+        items.push(Item {
+            page: Page::Sensors,
+            title: "Temperaturas".into(),
+            value: s.temp_max.map(|t| format!("{t:.0}°C máx")).unwrap_or("-".into()),
+            pct: s.temp_max,
+            spark: vec![],
+            spark_max: None,
+            grad: Grad::Heat,
+        });
+        items.push(Item {
+            page: Page::Procs,
+            title: "Procesos".into(),
+            value: format!("{}", s.tasks),
+            pct: None,
+            spark: vec![],
+            spark_max: None,
+            grad: Grad::Heat,
+        });
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("rtop").size(20.0).strong().color(c(th.accent)));
+        ui.add_space(4.0);
+        let mut clicked = None;
+        for it in &items {
+            let w = ui.available_width();
+            let has_extra = it.pct.is_some() || !it.spark.is_empty();
+            let h = if has_extra { 58.0 } else { 40.0 };
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+            let p = ui.painter();
+            let active = self.page == it.page;
+            let fill = if active {
+                c(th.sel)
+            } else if resp.hovered() {
+                c(th.sel).gamma_multiply(0.5)
+            } else {
+                Color32::TRANSPARENT
+            };
+            p.rect_filled(rect, CornerRadius::same(8), fill);
+            if active {
+                p.rect_filled(
+                    Rect::from_min_size(rect.min + Vec2::new(0.0, 8.0), Vec2::new(3.0, h - 16.0)),
+                    CornerRadius::same(2),
+                    c(th.accent),
+                );
+            }
+            let pad = 12.0;
+            p.text(
+                rect.left_top() + Vec2::new(pad, 9.0),
+                Align2::LEFT_TOP,
+                &it.title,
+                FontId::proportional(13.5),
+                if active { c(th.text) } else { c(th.text).gamma_multiply(0.85) },
+            );
+            let vcol = it.pct.map(|v| it.grad.at(&th, v / 100.0)).unwrap_or(c(th.dim));
+            p.text(rect.right_top() + Vec2::new(-pad, 10.0), Align2::RIGHT_TOP, &it.value, FontId::proportional(12.0), vcol);
+            if has_extra {
+                let inner = Rect::from_min_max(rect.left_top() + Vec2::new(pad, 32.0), rect.right_bottom() - Vec2::new(pad, 10.0));
+                if !it.spark.is_empty() {
+                    paint_spark(p, &th, inner, &it.spark, it.spark_max, it.grad);
+                } else if let Some(v) = it.pct {
+                    let r = Rect::from_min_size(inner.left_top() + Vec2::new(0.0, 4.0), Vec2::new(inner.width(), 8.0));
+                    paint_meter(p, &th, r, v, it.grad);
+                }
+            }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                clicked = Some(it.page);
+            }
+        }
+        if let Some(pg) = clicked {
+            self.page = pg;
+        }
+
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Ajustes").clicked() {
+                    self.show_settings = !self.show_settings;
+                }
+                let lbl = if self.paused { "Reanudar" } else { "Pausar" };
+                if ui.button(lbl).clicked() {
+                    self.paused = !self.paused;
+                }
+            });
+            if let Some((m, t)) = &self.flash {
+                if t.elapsed() < Duration::from_secs(4) {
+                    ui.label(RichText::new(m).color(c(self.th.warn)).size(11.0));
+                }
+            }
+        });
+    }
+
+    // ---------- página de procesos ----------
+
+    fn page_procs(&mut self, ui: &mut Ui) {
+        let th = self.th.clone();
         egui::Frame::new()
-            .fill(c(self.th.panel))
+            .fill(c(th.panel))
             .corner_radius(CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(14, 12))
+            .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 4.0;
-                add(ui)
-            })
-            .inner
-    }
-
-    fn caption(&self, t: &str) -> RichText {
-        RichText::new(t.to_uppercase()).color(c(self.th.dim)).size(11.0).strong()
-    }
-
-    /// Bloque CPU: el uso es lo protagonista, el modelo va chiquito.
-    fn cpu_hero(&self, ui: &mut Ui) {
-        let s = &self.mon.stats;
-        let th = &self.th;
-        self.card(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(Vec2::new(150.0, 0.0), Layout::top_down(Align::Min), |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(self.caption("CPU"));
-                    ui.label(
-                        RichText::new(format!("{:.0}%", s.cpu_total))
-                            .size(40.0)
-                            .strong()
-                            .color(c(th.heat(s.cpu_total))),
-                    );
-                    ui.label(RichText::new(&s.cpu_model).color(c(th.dim)).size(12.0))
-                        .on_hover_text(&s.cpu_brand);
-                    let mut extra = format!("{} hilos · {:.1} GHz", s.cores.len(), s.cpu_freq as f32 / 1000.0);
-                    if let Some(t) = s.temp_max {
-                        extra.push_str(&format!(" · {t:.0}°C"));
-                    }
-                    ui.label(RichText::new(extra).color(c(th.dim)).size(12.0));
-                });
-                ui.add_space(8.0);
-                self.core_tiles(ui, ui.available_width());
+                ui.set_min_height(ui.available_height());
+                self.toolbar(ui);
+                ui.add_space(4.0);
+                self.table(ui);
             });
-        });
-    }
-
-    fn core_tiles(&self, ui: &mut Ui, width: f32) {
-        let th = &self.th;
-        let cores = &self.mon.stats.cores;
-        let n = cores.len().max(1);
-        let per_row = n.min(16);
-        let rows = n.div_ceil(per_row);
-        let gap = 6.0;
-        let tile_w = (width - gap * (per_row as f32 - 1.0)) / per_row as f32;
-        let tile_h = if rows == 1 { 96.0 } else { 56.0 };
-        let (rect, resp) = ui.allocate_exact_size(
-            Vec2::new(width, rows as f32 * tile_h + (rows as f32 - 1.0) * gap),
-            Sense::hover(),
-        );
-        let p = ui.painter_at(rect);
-        let mut hovered = None;
-        for (i, &u) in cores.iter().enumerate() {
-            let (r, col) = (i / per_row, i % per_row);
-            let min = rect.min + Vec2::new(col as f32 * (tile_w + gap), r as f32 * (tile_h + gap));
-            let tile = egui::Rect::from_min_size(min, Vec2::new(tile_w, tile_h));
-            let rad = CornerRadius::same(6);
-            p.rect_filled(tile, rad, c(th.sel));
-            let frac = (u / 100.0).clamp(0.0, 1.0);
-            if frac > 0.0 {
-                let mut fill = tile;
-                fill.set_top(tile.bottom() - tile_h * frac);
-                p.rect_filled(fill, rad, c(th.heat(u)).gamma_multiply(0.85));
-            }
-            p.text(
-                tile.center(),
-                egui::Align2::CENTER_CENTER,
-                format!("{u:.0}%"),
-                FontId::proportional(if rows == 1 { 18.0 } else { 13.0 }),
-                c(th.text),
-            );
-            p.text(
-                tile.left_top() + Vec2::new(6.0, 4.0),
-                egui::Align2::LEFT_TOP,
-                format!("{i}"),
-                FontId::monospace(10.0),
-                c(th.dim),
-            );
-            if resp.hover_pos().is_some_and(|h| tile.contains(h)) {
-                hovered = Some((i, u));
-            }
-        }
-        if let Some((i, u)) = hovered {
-            resp.on_hover_text(format!("núcleo {i}: {u:.1}%"));
-        }
-    }
-
-    /// Tarjeta con título, valor grande, subtítulo y gráfico.
-    #[allow(clippy::too_many_arguments)]
-    fn metric(
-        &self,
-        ui: &mut Ui,
-        id: &str,
-        title: &str,
-        value: RichText,
-        sub: Vec<RichText>,
-        series: Vec<(String, Vec<f64>, Color32)>,
-        fmt_y: fn(f64) -> String,
-        percent: bool,
-    ) {
-        self.card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(self.caption(title));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(value);
-                });
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                for s in sub {
-                    ui.label(s.size(12.0));
-                }
-            });
-            let step = self.cfg.refresh_ms() as f64 / 1000.0;
-            let window = WINDOW as f64 * step;
-            let mut plot = Plot::new(id)
-                .height(PLOT_H)
-                .include_x(-window)
-                .include_x(0.0)
-                .include_y(0.0)
-                .show_axes([false, true])
-                .show_grid([false, true])
-                .show_background(false)
-                .y_axis_min_width(46.0)
-                .y_axis_formatter(move |m, _| fmt_y(m.value))
-                .label_formatter(move |hp| match hp {
-                    HoverPosition::NearDataPoint { plot_name, position, .. } => {
-                        Some(format!("{plot_name}: {}\nhace {:.0}s", fmt_y(position.y), -position.x))
-                    }
-                    _ => None,
-                })
-                .allow_drag(false)
-                .allow_zoom(false)
-                .allow_scroll(false)
-                .allow_boxed_zoom(false)
-                .allow_double_click_reset(false)
-                .set_margin_fraction(Vec2::new(0.0, 0.08));
-            if percent {
-                plot = plot.include_y(100.0);
-            }
-            plot.show(ui, |p| {
-                for (name, data, col) in series {
-                    let n = data.len();
-                    let pts: PlotPoints = data
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &v)| [(i as f64 - (n as f64 - 1.0)) * step, v])
-                        .collect::<Vec<_>>()
-                        .into();
-                    p.line(Line::new(name, pts).color(col).width(1.8).fill(0.0).fill_alpha(0.18));
-                }
-            });
-        });
-    }
-
-    fn metrics(&self, ui: &mut Ui) {
-        let s = &self.mon.stats;
-        let th = &self.th;
-        let m = &self.mon;
-        let big = |t: String, col: Rgb| RichText::new(t).size(20.0).strong().color(c(col));
-        let dim = |t: String| RichText::new(t).color(c(th.dim));
-        let tag = |t: String, col: Rgb| RichText::new(t).color(c(col));
-        let last = |q: &std::collections::VecDeque<f32>| -> Vec<f64> {
-            q.iter().rev().take(WINDOW).rev().map(|&v| v as f64).collect()
-        };
-        let last64 = |q: &std::collections::VecDeque<f64>| -> Vec<f64> {
-            q.iter().rev().take(WINDOW).rev().copied().collect()
-        };
-        let gpu_cols = [th.accent, th.mem, th.ok, th.warn];
-
-        let cols = if ui.available_width() > 1100.0 { 3 } else { 2 };
-        let gap = 10.0;
-        let card_w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
-
-        let mut cards: Vec<Box<dyn FnOnce(&mut Ui) + '_>> = vec![];
-
-        cards.push(Box::new(move |ui| {
-            self.metric(
-                ui,
-                "cpu",
-                "CPU",
-                big(format!("{:.0}%", s.cpu_total), th.heat(s.cpu_total)),
-                vec![
-                    dim(format!("carga {:.2} {:.2} {:.2}", s.load.0, s.load.1, s.load.2)),
-                    dim(format!("{} tareas", s.tasks)),
-                ],
-                vec![("CPU".into(), last(&m.cpu_hist), c(th.accent))],
-                pct_fmt,
-                true,
-            )
-        }));
-        cards.push(Box::new(move |ui| {
-            self.metric(
-                ui,
-                "mem",
-                "Memoria",
-                big(format!("{:.0}%", s.mem_pct()), th.heat(s.mem_pct())),
-                vec![
-                    dim(format!("{} / {}", human(s.mem_used), human(s.mem_total))),
-                    dim(format!("swap {} / {}", human(s.swap_used), human(s.swap_total))),
-                ],
-                vec![("RAM".into(), last(&m.mem_hist), c(th.mem))],
-                pct_fmt,
-                true,
-            )
-        }));
-        cards.push(Box::new(move |ui| {
-            self.metric(
-                ui,
-                "net",
-                "Red",
-                big(format!("{}/s", human((s.rx_rate + s.tx_rate) as u64)), th.text),
-                vec![
-                    tag(format!("bajada {}/s", human(s.rx_rate as u64)), th.ok),
-                    tag(format!("subida {}/s", human(s.tx_rate as u64)), th.warn),
-                ],
-                vec![
-                    ("bajada".into(), last64(&m.rx_hist), c(th.ok)),
-                    ("subida".into(), last64(&m.tx_hist), c(th.warn)),
-                ],
-                rate_fmt,
-                false,
-            )
-        }));
-        cards.push(Box::new(move |ui| {
-            self.metric(
-                ui,
-                "disk",
-                "Disco",
-                big(format!("{}/s", human((s.disk_read_rate + s.disk_write_rate) as u64)), th.text),
-                vec![
-                    tag(format!("lectura {}/s", human(s.disk_read_rate as u64)), th.accent),
-                    tag(format!("escritura {}/s", human(s.disk_write_rate as u64)), th.mem),
-                    dim(format!("/ {} de {} ({:.0}%)", human(s.disk_used), human(s.disk_total), s.disk_pct())),
-                ],
-                vec![
-                    ("lectura".into(), last64(&m.disk_r_hist), c(th.accent)),
-                    ("escritura".into(), last64(&m.disk_w_hist), c(th.mem)),
-                ],
-                rate_fmt,
-                false,
-            )
-        }));
-        cards.push(Box::new(move |ui| {
-            let g0 = s.gpus.iter().find(|g| !g.asleep);
-            let v = g0.and_then(|g| g.busy).unwrap_or(0.0);
-            let sub = s
-                .gpus
-                .iter()
-                .enumerate()
-                .map(|(i, g)| {
-                    let col = gpu_cols[i % gpu_cols.len()];
-                    if g.asleep {
-                        return tag(format!("{} dormida", g.short_name()), th.dim);
-                    }
-                    let mut t = format!("{} {:.0}%", g.short_name(), g.busy.unwrap_or(0.0));
-                    if let Some(x) = g.temp {
-                        t.push_str(&format!(" {x:.0}°C"));
-                    }
-                    if let Some(w) = g.power_w {
-                        t.push_str(&format!(" {w:.1}W"));
-                    }
-                    tag(t, col)
-                })
-                .collect::<Vec<_>>();
-            let series = s
-                .gpus
-                .iter()
-                .enumerate()
-                .map(|(i, g)| (g.short_name(), last(&m.gpu_hist[i]), c(gpu_cols[i % gpu_cols.len()])))
-                .collect();
-            self.metric(
-                ui,
-                "gpu",
-                "GPU",
-                big(if s.gpus.is_empty() { "-".into() } else { format!("{v:.0}%") }, th.heat(v)),
-                if sub.is_empty() { vec![dim("no se detectó GPU".into())] } else { sub },
-                series,
-                pct_fmt,
-                true,
-            )
-        }));
-        cards.push(Box::new(move |ui| {
-            let g0 = s.gpus.iter().find(|g| !g.asleep && g.vram_total > 0);
-            let sub = s
-                .gpus
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| !g.asleep && g.vram_total > 0)
-                .map(|(i, g)| {
-                    let mut t = format!("{} {} / {}", g.short_name(), human(g.vram_used), human(g.vram_total));
-                    if g.shared_total > 0 {
-                        t.push_str(&format!(" (+{} compartida)", human(g.shared_used)));
-                    }
-                    tag(t, gpu_cols[i % gpu_cols.len()])
-                })
-                .collect::<Vec<_>>();
-            let series = s
-                .gpus
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| !g.asleep)
-                .map(|(i, g)| (g.short_name(), last(&m.vram_hist[i]), c(gpu_cols[i % gpu_cols.len()])))
-                .collect();
-            self.metric(
-                ui,
-                "vram",
-                "VRAM",
-                match g0 {
-                    Some(g) => big(format!("{:.0}%", g.vram_pct()), th.heat(g.vram_pct())),
-                    None => big("-".into(), th.dim),
-                },
-                if sub.is_empty() { vec![dim("sin datos de VRAM".into())] } else { sub },
-                series,
-                pct_fmt,
-                true,
-            )
-        }));
-
-        let mut it = cards.into_iter().peekable();
-        while it.peek().is_some() {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for _ in 0..cols {
-                    if let Some(f) = it.next() {
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(card_w, 0.0),
-                            Layout::top_down(Align::Min),
-                            |ui| f(ui),
-                        );
-                    }
-                }
-            });
-        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(self.caption("Procesos"));
+            ui.label(caption(&self.th, "Procesos"));
             ui.add_space(6.0);
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("nombre, comando, usuario o pid")
-                    .desired_width(260.0),
+                    .hint_text("filtrar por nombre, comando, usuario o pid")
+                    .desired_width(300.0),
             );
             if r.changed() {
                 self.rebuild();
@@ -487,29 +344,15 @@ impl App {
             ui.separator();
             ui.label(format!("{} procesos", self.view.len()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Ajustes").clicked() {
-                    self.show_settings = !self.show_settings;
+                let mut cmd = self.cfg.show_cmd;
+                if ui.checkbox(&mut cmd, "comando completo").changed() {
+                    self.cfg.show_cmd = cmd;
+                    self.save_cfg();
                 }
-                let lbl = if self.paused { "Reanudar" } else { "Pausar" };
-                if ui.button(lbl).clicked() {
-                    self.paused = !self.paused;
-                }
-                let can_kill = self.selected.is_some();
-                if ui.add_enabled(can_kill, egui::Button::new("Matar proceso")).clicked() {
+                if ui.add_enabled(self.selected.is_some(), egui::Button::new("Matar proceso")).clicked() {
                     if let Some(pid) = self.selected {
-                        let name = self
-                            .mon
-                            .procs
-                            .iter()
-                            .find(|p| p.pid == pid)
-                            .map(|p| p.name.clone())
-                            .unwrap_or_default();
+                        let name = self.mon.proc(pid).map(|p| p.name.clone()).unwrap_or_default();
                         self.confirm_kill = Some((pid, name));
-                    }
-                }
-                if let Some((m, t)) = &self.flash {
-                    if t.elapsed() < Duration::from_secs(4) {
-                        ui.label(RichText::new(m).color(c(self.th.warn)));
                     }
                 }
             });
@@ -548,31 +391,29 @@ impl App {
             .cell_layout(Layout::left_to_right(Align::Center))
             .column(Column::exact(70.0))
             .column(Column::exact(100.0))
-            .column(Column::exact(64.0))
-            .column(Column::exact(64.0))
+            .column(Column::exact(120.0))
+            .column(Column::exact(110.0))
             .column(Column::exact(70.0))
+            .column(Column::exact(90.0))
             .column(Column::exact(24.0))
             .column(Column::exact(84.0))
             .column(Column::remainder().clip(true))
-            .header(24.0, |mut h| {
+            .header(26.0, |mut h| {
                 h.col(|ui| hdr(ui, "PID", Some(SortBy::Pid), &mut clicked_sort));
                 h.col(|ui| hdr(ui, "USUARIO", None, &mut clicked_sort));
                 h.col(|ui| hdr(ui, "CPU%", Some(SortBy::Cpu), &mut clicked_sort));
                 h.col(|ui| hdr(ui, "MEM%", Some(SortBy::Mem), &mut clicked_sort));
                 h.col(|ui| hdr(ui, "RES", None, &mut clicked_sort));
+                h.col(|ui| hdr(ui, "DISCO", Some(SortBy::Disk), &mut clicked_sort));
                 h.col(|ui| hdr(ui, "S", None, &mut clicked_sort));
                 h.col(|ui| hdr(ui, "TIEMPO", Some(SortBy::Time), &mut clicked_sort));
-                h.col(|ui| {
-                    hdr(ui, if show_cmd { "COMANDO" } else { "NOMBRE" }, Some(SortBy::Name), &mut clicked_sort)
-                });
+                h.col(|ui| hdr(ui, if show_cmd { "COMANDO" } else { "NOMBRE" }, Some(SortBy::Name), &mut clicked_sort));
             })
             .body(|body| {
-                body.rows(20.0, self.view.len(), |mut row| {
+                body.rows(22.0, self.view.len(), |mut row| {
                     let p = &self.mon.procs[self.view[row.index()]];
                     row.set_selected(self.selected == Some(p.pid));
-                    let mono = |t: String, col: Rgb| RichText::new(t).monospace().color(c(col));
-                    let cpu_c = if p.cpu < 1.0 { th.dim } else { th.heat(p.cpu) };
-                    let mem_c = if p.mem_pct < 1.0 { th.dim } else { th.heat(p.mem_pct * 4.0) };
+                    let mono = |t: String, col: Color32| RichText::new(t).monospace().color(col);
                     let user_c = if p.user == "root" { th.hot } else { th.text };
                     let st_c = match p.state {
                         State::Run => th.ok,
@@ -581,21 +422,45 @@ impl App {
                         _ => th.dim,
                     };
                     let label = if show_cmd && !p.cmd.is_empty() { &p.cmd } else { &p.name };
-                    row.col(|ui| { ui.label(mono(format!("{:>7}", p.pid), th.dim)); });
-                    row.col(|ui| { ui.label(mono(p.user.clone(), user_c)); });
-                    row.col(|ui| { ui.label(mono(format!("{:>5.1}", p.cpu), cpu_c)); });
-                    row.col(|ui| { ui.label(mono(format!("{:>5.1}", p.mem_pct), mem_c)); });
-                    row.col(|ui| { ui.label(mono(format!("{:>6}", human(p.mem)), th.text)); });
-                    row.col(|ui| { ui.label(mono(p.state.letter().into(), st_c)); });
-                    row.col(|ui| { ui.label(mono(hms(p.time), th.dim)); });
-                    row.col(|ui| { ui.label(mono(label.clone(), th.text)); });
+                    let meter_cell = |ui: &mut Ui, v: f32, g: Grad, t: String, faint: bool| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(44.0, 8.0), Sense::hover());
+                        paint_meter(ui.painter(), &th, r, v, g);
+                        ui.label(mono(t, if faint { c(th.dim) } else { c(th.text) }));
+                    };
+                    row.col(|ui| {
+                        ui.label(mono(format!("{:>7}", p.pid), c(th.dim)));
+                    });
+                    row.col(|ui| {
+                        ui.label(mono(p.user.clone(), c(user_c)));
+                    });
+                    row.col(|ui| meter_cell(ui, p.cpu.min(100.0), Grad::Heat, format!("{:>5.1}", p.cpu), p.cpu < 1.0));
+                    row.col(|ui| meter_cell(ui, p.mem_pct * 4.0, Grad::Mono(th.mem), format!("{:>4.1}", p.mem_pct), p.mem_pct < 1.0));
+                    row.col(|ui| {
+                        ui.label(mono(format!("{:>6}", human(p.mem)), c(th.text)));
+                    });
+                    row.col(|ui| {
+                        let io = p.disk_read + p.disk_write;
+                        ui.label(mono(
+                            if io > 0.0 { format!("{}/s", human(io as u64)) } else { "-".into() },
+                            if io > 0.0 { c(th.accent) } else { c(th.dim) },
+                        ));
+                    });
+                    row.col(|ui| {
+                        ui.label(mono(p.state.letter().into(), c(st_c)));
+                    });
+                    row.col(|ui| {
+                        ui.label(mono(hms(p.time), c(th.dim)));
+                    });
+                    row.col(|ui| {
+                        ui.label(mono(label.clone(), c(th.text)));
+                    });
                     let r = row.response();
                     if r.clicked() {
                         clicked_row = Some(p.pid);
                     }
                     let (pid, name) = (p.pid, p.name.clone());
                     r.context_menu(|ui| {
-                        if ui.button("Terminar (SIGTERM)").clicked() {
+                        if ui.button("Terminar proceso").clicked() {
                             kill_req = Some((pid, name.clone()));
                             ui.close();
                         }
@@ -614,6 +479,8 @@ impl App {
         }
     }
 
+    // ---------- ventanas ----------
+
     fn settings(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut changed = false;
@@ -624,16 +491,14 @@ impl App {
             .show(ctx, |ui| {
                 egui::Grid::new("cfg").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     ui.label("Tema");
-                    egui::ComboBox::from_id_salt("theme")
-                        .selected_text(self.cfg.theme.clone())
-                        .show_ui(ui, |ui| {
-                            for t in THEMES {
-                                if ui.selectable_label(self.cfg.theme == t.name, t.name).clicked() {
-                                    self.cfg.theme = t.name.to_string();
-                                    changed = true;
-                                }
+                    egui::ComboBox::from_id_salt("theme").selected_text(self.cfg.theme.clone()).show_ui(ui, |ui| {
+                        for t in THEMES {
+                            if ui.selectable_label(self.cfg.theme == t.name, t.name).clicked() {
+                                self.cfg.theme = t.name.to_string();
+                                changed = true;
                             }
-                        });
+                        }
+                    });
                     ui.end_row();
 
                     ui.label("Refresco (ms)");
@@ -642,10 +507,6 @@ impl App {
                         self.cfg.refresh_ms = ms;
                         changed = true;
                     }
-                    ui.end_row();
-
-                    ui.label("Gráficos");
-                    changed |= ui.checkbox(&mut self.cfg.show_graphs, "mostrar").changed();
                     ui.end_row();
 
                     ui.label("Comando completo");
@@ -745,10 +606,9 @@ impl App {
             }
         }
     }
-}
 
-impl App {
-    /// `RTOP_SHOT=/ruta.ppm rtop-gui`: se saca una captura a los 4 s y se cierra.
+    /// `RTOP_SHOT=/ruta.ppm rtop-gui`: se saca una captura y se cierra
+    /// (`RTOP_SHOT_DELAY` segundos, 4 por defecto). Sirve para probar la UI.
     fn debug_shot(&mut self, ctx: &egui::Context) {
         let Some(path) = std::env::var_os("RTOP_SHOT") else { return };
         let delay = std::env::var("RTOP_SHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
@@ -775,6 +635,14 @@ impl App {
     }
 }
 
+fn kit_blend(a: Rgb, b: Rgb) -> Color32 {
+    Color32::from_rgb(
+        ((a.0 as u16 + b.0 as u16) / 2) as u8,
+        ((a.1 as u16 + b.1 as u16) / 2) as u8,
+        ((a.2 as u16 + b.2 as u16) / 2) as u8,
+    )
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -792,26 +660,39 @@ impl eframe::App for App {
             self.selected = None;
         }
 
+        egui::Panel::right("nav")
+            .exact_size(230.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(c(self.th.panel)).inner_margin(egui::Margin::symmetric(10, 10)))
+            .show(ui, |ui| self.nav(ui));
+
+        let page = self.page;
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(c(self.th.bg)).inner_margin(10.0))
+            .frame(egui::Frame::new().fill(c(self.th.bg)).inner_margin(12.0))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(10.0, 10.0);
-                self.cpu_hero(ui);
-                if self.cfg.show_graphs {
-                    self.metrics(ui);
+                if page == Page::Procs {
+                    self.page_procs(ui);
+                    return;
                 }
-                egui::Frame::new()
-                    .fill(c(self.th.panel))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(14, 10))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.set_min_height(ui.available_height());
-                        self.toolbar(ui);
-                        ui.add_space(4.0);
-                        self.table(ui);
-                    });
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match page {
+                    Page::Overview => self.page_overview(ui),
+                    Page::Cpu => self.page_cpu(ui),
+                    Page::Mem => self.page_mem(ui),
+                    Page::Gpu(i) => self.page_gpu(ui, i),
+                    Page::Net => self.page_net(ui),
+                    Page::Disk => self.page_disk(ui),
+                    Page::Sensors => self.page_sensors(ui),
+                    Page::Procs => {}
+                });
             });
+
+        if let Some(p) = self.goto.take() {
+            self.page = p;
+        }
+        if let Some(k) = self.kill_req.take() {
+            self.confirm_kill = Some(k);
+        }
 
         self.settings(&ctx);
         self.confirm(&ctx);
@@ -820,13 +701,25 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // En laptops híbridas wgpu elige la GPU potente por defecto: eso despierta
+    // la dedicada y gasta batería. Un monitor tiene que usar la integrada.
+    if std::env::var_os("WGPU_POWER_PREF").is_none() {
+        std::env::set_var("WGPU_POWER_PREF", "low");
+    }
     let opts = eframe::NativeOptions {
+        // OpenGL gasta bastante menos CPU que wgpu para una UI así
+        renderer: if std::env::var("RTOP_RENDERER").as_deref() == Ok("wgpu") {
+            eframe::Renderer::Wgpu
+        } else {
+            eframe::Renderer::Glow
+        },
         viewport: egui::ViewportBuilder::default()
             .with_title("rtop")
             .with_app_id("rtop")
-            .with_inner_size([1360.0, 960.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_inner_size([1440.0, 960.0])
+            .with_min_inner_size([1000.0, 640.0]),
         ..Default::default()
     };
     eframe::run_native("rtop", opts, Box::new(|_cc| Ok(Box::new(App::new()))))
 }
+

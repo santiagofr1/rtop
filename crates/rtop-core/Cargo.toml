@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
-sysinfo = "0.33"
+sysinfo = { version = "0.33", default-features = false, features = ["system", "disk", "network", "component", "user"] }
 toml = "1.2.1"

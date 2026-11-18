@@ -6,19 +6,22 @@ pub mod fmt;
 pub mod gpu;
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, HashMap, VecDeque},
+    fs,
     time::Instant,
 };
 
 use sysinfo::{
-    Components, Disks, Networks, Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal,
-    System, Users,
+    Components, DiskKind, Disks, Networks, Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate,
+    Signal, System, UpdateKind, Users,
 };
 
 pub use config::{Config, Rgb, Theme};
-pub use gpu::{Gpu, Vendor};
+pub use gpu::{Gpu, GpuProc, Vendor};
 
 pub const HIST: usize = 300;
+
+pub type Hist<T> = VecDeque<T>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -67,6 +70,9 @@ pub struct Proc {
     pub time: u64,
     pub name: String,
     pub cmd: String,
+    /// bytes/s
+    pub disk_read: f64,
+    pub disk_write: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,14 +82,15 @@ pub enum SortBy {
     Time,
     Pid,
     Name,
+    Disk,
 }
 
 impl SortBy {
-    pub const ALL: [SortBy; 5] = [SortBy::Cpu, SortBy::Mem, SortBy::Time, SortBy::Pid, SortBy::Name];
+    pub const CYCLE: [SortBy; 5] = [SortBy::Cpu, SortBy::Mem, SortBy::Time, SortBy::Pid, SortBy::Name];
 
     pub fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
+        let i = Self::CYCLE.iter().position(|s| *s == self).unwrap_or(0);
+        Self::CYCLE[(i + 1) % Self::CYCLE.len()]
     }
     pub fn label(self) -> &'static str {
         match self {
@@ -92,32 +99,138 @@ impl SortBy {
             SortBy::Time => "TIEMPO",
             SortBy::Pid => "PID",
             SortBy::Name => "NOMBRE",
+            SortBy::Disk => "DISCO",
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct Temp {
+    pub label: String,
+    pub value: f32,
+    pub max: Option<f32>,
+    pub crit: Option<f32>,
+}
+
+/// Desglose de `/proc/meminfo` (bytes).
+#[derive(Clone, Debug, Default)]
+pub struct MemInfo {
+    pub total: u64,
+    pub free: u64,
+    pub available: u64,
+    pub buffers: u64,
+    pub cached: u64,
+    pub shmem: u64,
+    pub sreclaimable: u64,
+    pub dirty: u64,
+    pub swap_cached: u64,
+}
+
+impl MemInfo {
+    /// lo que de verdad usan los programas
+    pub fn used(&self) -> u64 {
+        self.total.saturating_sub(self.available)
+    }
+    /// caché + buffers (se libera si hace falta)
+    pub fn cache(&self) -> u64 {
+        (self.cached + self.buffers + self.sreclaimable).saturating_sub(self.shmem)
+    }
+
+    fn read() -> MemInfo {
+        let mut m = MemInfo::default();
+        let Ok(s) = fs::read_to_string("/proc/meminfo") else { return m };
+        for l in s.lines() {
+            let Some((k, v)) = l.split_once(':') else { continue };
+            let kb: u64 = v.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let b = kb * 1024;
+            match k {
+                "MemTotal" => m.total = b,
+                "MemFree" => m.free = b,
+                "MemAvailable" => m.available = b,
+                "Buffers" => m.buffers = b,
+                "Cached" => m.cached = b,
+                "Shmem" => m.shmem = b,
+                "SReclaimable" => m.sreclaimable = b,
+                "Dirty" => m.dirty = b,
+                "SwapCached" => m.swap_cached = b,
+                _ => {}
+            }
+        }
+        m
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NetIf {
+    pub name: String,
+    pub rx_rate: f64,
+    pub tx_rate: f64,
+    pub total_rx: u64,
+    pub total_tx: u64,
+    pub ips: Vec<String>,
+    pub mac: String,
+}
+
+impl NetIf {
+    /// interfaces virtuales (docker, bridges, veth)
+    pub fn is_virtual(&self) -> bool {
+        ["docker", "br-", "veth", "virbr", "vnet"].iter().any(|p| self.name.starts_with(p))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Mount {
+    pub device: String,
+    pub mount: String,
+    pub fs: String,
+    pub total: u64,
+    pub used: u64,
+    pub ssd: bool,
+    pub removable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiskDev {
+    pub name: String,
+    pub model: Option<String>,
+    pub read_rate: f64,
+    pub write_rate: f64,
+    pub read_total: u64,
+    pub write_total: u64,
 }
 
 /// Snapshot del sistema (lo que no son procesos).
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
     pub host: String,
+    pub os: String,
+    pub kernel: String,
     pub cpu_brand: String,
     /// "Ryzen 7 7445HS" en vez del nombre larguísimo
     pub cpu_model: String,
     /// MHz promedio
     pub cpu_freq: u64,
+    pub core_freq: Vec<u64>,
     pub cores: Vec<f32>,
     pub cpu_total: f32,
     pub mem_total: u64,
     pub mem_used: u64,
     pub swap_total: u64,
     pub swap_used: u64,
+    pub meminfo: MemInfo,
     pub load: (f64, f64, f64),
     pub uptime: u64,
     pub rx_rate: f64,
     pub tx_rate: f64,
+    pub nets: Vec<NetIf>,
+    pub temps: Vec<Temp>,
     pub temp_max: Option<f32>,
+    /// temperatura del CPU (Tctl / Package / coretemp)
+    pub cpu_temp: Option<f32>,
     pub disk_read_rate: f64,
     pub disk_write_rate: f64,
+    pub devs: Vec<DiskDev>,
+    pub mounts: Vec<Mount>,
     /// espacio del disco raíz
     pub disk_used: u64,
     pub disk_total: u64,
@@ -138,8 +251,17 @@ impl Stats {
     }
 }
 
-fn pct(a: u64, b: u64) -> f32 {
+pub fn pct(a: u64, b: u64) -> f32 {
     if b == 0 { 0.0 } else { a as f32 * 100.0 / b as f32 }
+}
+
+#[derive(Default)]
+pub struct GpuHist {
+    pub busy: Hist<f32>,
+    pub vram: Hist<f32>,
+    pub temp: Hist<f32>,
+    pub power: Hist<f32>,
+    pub clock: Hist<f32>,
 }
 
 pub struct Monitor {
@@ -149,19 +271,30 @@ pub struct Monitor {
     comps: Components,
     disks: Disks,
     gpu: gpu::GpuPoller,
-    disk_prev: (u64, u64),
+    dev_prev: HashMap<String, (u64, u64)>,
+    ticks: u64,
     last: Instant,
     pub stats: Stats,
     pub procs: Vec<Proc>,
-    pub cpu_hist: VecDeque<f32>,
-    pub mem_hist: VecDeque<f32>,
-    pub rx_hist: VecDeque<f64>,
-    pub tx_hist: VecDeque<f64>,
-    pub disk_r_hist: VecDeque<f64>,
-    pub disk_w_hist: VecDeque<f64>,
+    pub cpu_hist: Hist<f32>,
+    pub core_hist: Vec<Hist<f32>>,
+    pub freq_hist: Hist<f32>,
+    pub load_hist: Hist<f32>,
+    pub mem_hist: Hist<f32>,
+    pub cache_hist: Hist<f32>,
+    pub swap_hist: Hist<f32>,
+    pub rx_hist: Hist<f64>,
+    pub tx_hist: Hist<f64>,
+    pub disk_r_hist: Hist<f64>,
+    pub disk_w_hist: Hist<f64>,
+    pub net_hist: BTreeMap<String, (Hist<f64>, Hist<f64>)>,
+    pub dev_hist: BTreeMap<String, (Hist<f64>, Hist<f64>)>,
+    pub temp_hist: BTreeMap<String, Hist<f32>>,
     /// por GPU (mismo orden que `stats.gpus`)
-    pub gpu_hist: Vec<VecDeque<f32>>,
-    pub vram_hist: Vec<VecDeque<f32>>,
+    pub gpu_hist: Vec<Hist<f32>>,
+    pub vram_hist: Vec<Hist<f32>>,
+    /// por id de GPU, con más series
+    pub gpu_detail: BTreeMap<String, GpuHist>,
 }
 
 impl Monitor {
@@ -177,18 +310,28 @@ impl Monitor {
             comps: Components::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             gpu: gpu::GpuPoller::start(&brand, std::time::Duration::from_millis(1000)),
-            disk_prev: disk::totals(),
+            dev_prev: disk::devices().into_iter().map(|d| (d.name, (d.read, d.write))).collect(),
+            ticks: 0,
             last: Instant::now(),
             stats: Stats::default(),
             procs: Vec::new(),
-            cpu_hist: VecDeque::with_capacity(HIST),
-            mem_hist: VecDeque::with_capacity(HIST),
-            rx_hist: VecDeque::with_capacity(HIST),
-            tx_hist: VecDeque::with_capacity(HIST),
-            disk_r_hist: VecDeque::with_capacity(HIST),
-            disk_w_hist: VecDeque::with_capacity(HIST),
+            cpu_hist: Hist::with_capacity(HIST),
+            core_hist: vec![],
+            freq_hist: Hist::with_capacity(HIST),
+            load_hist: Hist::with_capacity(HIST),
+            mem_hist: Hist::with_capacity(HIST),
+            cache_hist: Hist::with_capacity(HIST),
+            swap_hist: Hist::with_capacity(HIST),
+            rx_hist: Hist::with_capacity(HIST),
+            tx_hist: Hist::with_capacity(HIST),
+            disk_r_hist: Hist::with_capacity(HIST),
+            disk_w_hist: Hist::with_capacity(HIST),
+            net_hist: BTreeMap::new(),
+            dev_hist: BTreeMap::new(),
+            temp_hist: BTreeMap::new(),
             gpu_hist: vec![],
             vram_hist: vec![],
+            gpu_detail: BTreeMap::new(),
         };
         m.collect(0.0);
         m
@@ -197,47 +340,116 @@ impl Monitor {
     pub fn refresh(&mut self) {
         let dt = self.last.elapsed().as_secs_f64().max(0.001);
         self.last = Instant::now();
-        self.sys.refresh_cpu_usage();
+        self.sys.refresh_cpu_all();
         self.sys.refresh_memory();
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::everything(),
+            // solo lo que se muestra: `everything()` lee entorno, exe, cwd... y es lento
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .with_disk_usage()
+                .with_user(UpdateKind::OnlyIfNotSet)
+                .with_cmd(UpdateKind::OnlyIfNotSet),
         );
         self.nets.refresh(true);
-        self.comps.refresh(false);
+        self.ticks += 1;
+        // los sensores (hwmon, nvme) tardan ~10 ms en leerse y cambian lento
+        if self.ticks % 3 == 0 {
+            self.comps.refresh(false);
+        }
         self.disks.refresh(false);
         self.collect(dt);
     }
 
     fn collect(&mut self, dt: f64) {
-        let (rx, tx) = self
+        let rate = |b: u64| if dt > 0.0 { b as f64 / dt } else { 0.0 };
+
+        // red
+        let mut nets: Vec<NetIf> = self
             .nets
             .iter()
             .filter(|(n, _)| *n != "lo")
-            .fold((0u64, 0u64), |(r, t), (_, d)| (r + d.received(), t + d.transmitted()));
-        let (rx_rate, tx_rate) = if dt > 0.0 { (rx as f64 / dt, tx as f64 / dt) } else { (0.0, 0.0) };
+            .map(|(n, d)| NetIf {
+                name: n.clone(),
+                rx_rate: rate(d.received()),
+                tx_rate: rate(d.transmitted()),
+                total_rx: d.total_received(),
+                total_tx: d.total_transmitted(),
+                ips: d.ip_networks().iter().map(|ip| format!("{}/{}", ip.addr, ip.prefix)).collect(),
+                mac: d.mac_address().to_string(),
+            })
+            .collect();
+        // primero las que tienen tráfico, después las virtuales
+        nets.sort_by(|a, b| {
+            a.is_virtual()
+                .cmp(&b.is_virtual())
+                .then((b.total_rx + b.total_tx).cmp(&(a.total_rx + a.total_tx)))
+        });
+        let rx_rate: f64 = nets.iter().map(|n| n.rx_rate).sum();
+        let tx_rate: f64 = nets.iter().map(|n| n.tx_rate).sum();
 
-        let dnow = disk::totals();
-        let (dr, dw) = if dt > 0.0 {
-            (
-                dnow.0.saturating_sub(self.disk_prev.0) as f64 / dt,
-                dnow.1.saturating_sub(self.disk_prev.1) as f64 / dt,
-            )
-        } else {
-            (0.0, 0.0)
-        };
-        self.disk_prev = dnow;
-        let root = self
+        // disco
+        let devs: Vec<DiskDev> = disk::devices()
+            .into_iter()
+            .map(|d| {
+                let (pr, pw) = self.dev_prev.get(&d.name).copied().unwrap_or((d.read, d.write));
+                self.dev_prev.insert(d.name.clone(), (d.read, d.write));
+                DiskDev {
+                    model: disk::model(&d.name),
+                    read_rate: rate(d.read.saturating_sub(pr)),
+                    write_rate: rate(d.write.saturating_sub(pw)),
+                    read_total: d.read,
+                    write_total: d.write,
+                    name: d.name,
+                }
+            })
+            .collect();
+        let dr: f64 = devs.iter().map(|d| d.read_rate).sum();
+        let dw: f64 = devs.iter().map(|d| d.write_rate).sum();
+        let mounts: Vec<Mount> = self
             .disks
             .iter()
-            .find(|d| d.mount_point() == std::path::Path::new("/"))
-            .or_else(|| self.disks.iter().max_by_key(|d| d.total_space()));
-        let (disk_total, disk_used) = root
-            .map(|d| (d.total_space(), d.total_space().saturating_sub(d.available_space())))
-            .unwrap_or((0, 0));
+            .filter(|d| d.total_space() > 0)
+            .map(|d| Mount {
+                device: d.name().to_string_lossy().into_owned(),
+                mount: d.mount_point().to_string_lossy().into_owned(),
+                fs: d.file_system().to_string_lossy().into_owned(),
+                total: d.total_space(),
+                used: d.total_space().saturating_sub(d.available_space()),
+                ssd: d.kind() == DiskKind::SSD,
+                removable: d.is_removable(),
+            })
+            .collect();
+        let root = mounts
+            .iter()
+            .find(|m| m.mount == "/")
+            .or_else(|| mounts.iter().max_by_key(|m| m.total));
+        let (disk_total, disk_used) = root.map(|m| (m.total, m.used)).unwrap_or((0, 0));
+
+        // temperaturas
+        let temps: Vec<Temp> = self
+            .comps
+            .iter()
+            .filter_map(|c| {
+                let v = c.temperature()?;
+                v.is_finite().then(|| Temp {
+                    label: pretty_sensor(c.label()),
+                    value: v,
+                    max: c.max().filter(|m| m.is_finite()),
+                    crit: c.critical().filter(|m| m.is_finite()),
+                })
+            })
+            .collect();
+        let cpu_temp = temps
+            .iter()
+            .find(|t| ["CPU", "Tctl", "Tdie", "Package"].iter().any(|k| t.label.contains(k)))
+            .map(|t| t.value);
+
         let gpus = self.gpu.latest();
 
+        // procesos
         let mem_total = self.sys.total_memory();
         let mt = mem_total.max(1) as f32;
         let users = &self.users;
@@ -246,76 +458,108 @@ impl Monitor {
             .processes()
             .values()
             .filter(|p| p.thread_kind().is_none())
-            .map(|p| Proc {
-                pid: p.pid().as_u32(),
-                user: p
-                    .user_id()
-                    .and_then(|u| users.get_user_by_id(u))
-                    .map(|u| u.name().to_string())
-                    .unwrap_or_else(|| "?".into()),
-                cpu: p.cpu_usage(),
-                mem: p.memory(),
-                mem_pct: p.memory() as f32 * 100.0 / mt,
-                state: p.status().into(),
-                time: p.run_time(),
-                name: p.name().to_string_lossy().into_owned(),
-                cmd: p
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(" "),
+            .map(|p| {
+                let du = p.disk_usage();
+                Proc {
+                    pid: p.pid().as_u32(),
+                    user: p
+                        .user_id()
+                        .and_then(|u| users.get_user_by_id(u))
+                        .map(|u| u.name().to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    cpu: p.cpu_usage(),
+                    mem: p.memory(),
+                    mem_pct: p.memory() as f32 * 100.0 / mt,
+                    state: p.status().into(),
+                    time: p.run_time(),
+                    name: p.name().to_string_lossy().into_owned(),
+                    cmd: p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" "),
+                    disk_read: rate(du.read_bytes),
+                    disk_write: rate(du.written_bytes),
+                }
             })
             .collect();
 
         let la = System::load_average();
         let cpus = self.sys.cpus();
+        let core_freq: Vec<u64> = cpus.iter().map(|c| c.frequency()).collect();
         self.stats = Stats {
             host: System::host_name().unwrap_or_else(|| "sistema".into()),
+            os: System::long_os_version().unwrap_or_default(),
+            kernel: System::kernel_version().unwrap_or_default(),
             cpu_brand: cpus.first().map(|c| c.brand().trim().to_string()).unwrap_or_default(),
             cpu_model: short_cpu_name(cpus.first().map(|c| c.brand()).unwrap_or("")),
-            cpu_freq: if cpus.is_empty() {
-                0
-            } else {
-                cpus.iter().map(|c| c.frequency()).sum::<u64>() / cpus.len() as u64
-            },
+            cpu_freq: if core_freq.is_empty() { 0 } else { core_freq.iter().sum::<u64>() / core_freq.len() as u64 },
+            core_freq,
             cores: cpus.iter().map(|c| c.cpu_usage()).collect(),
             cpu_total: self.sys.global_cpu_usage(),
             mem_total,
             mem_used: self.sys.used_memory(),
             swap_total: self.sys.total_swap(),
             swap_used: self.sys.used_swap(),
+            meminfo: MemInfo::read(),
             load: (la.one, la.five, la.fifteen),
             uptime: System::uptime(),
             rx_rate,
             tx_rate,
-            temp_max: self
-                .comps
-                .iter()
-                .filter_map(|c| c.temperature())
-                .filter(|t| t.is_finite())
-                .reduce(f32::max),
+            nets,
+            temp_max: temps.iter().map(|t| t.value).reduce(f32::max),
+            cpu_temp,
+            temps,
             disk_read_rate: dr,
             disk_write_rate: dw,
+            devs,
+            mounts,
             disk_used,
             disk_total,
             gpus,
             tasks: self.procs.len(),
             running: self.procs.iter().filter(|p| p.state == State::Run).count(),
         };
+        self.push_history();
+    }
 
-        push(&mut self.cpu_hist, self.stats.cpu_total);
-        push(&mut self.mem_hist, self.stats.mem_pct());
-        push(&mut self.rx_hist, rx_rate);
-        push(&mut self.tx_hist, tx_rate);
-        push(&mut self.disk_r_hist, dr);
-        push(&mut self.disk_w_hist, dw);
-        let n = self.stats.gpus.len();
-        self.gpu_hist.resize_with(n, VecDeque::new);
-        self.vram_hist.resize_with(n, VecDeque::new);
-        for (i, g) in self.stats.gpus.iter().enumerate() {
+    fn push_history(&mut self) {
+        let s = &self.stats;
+        push(&mut self.cpu_hist, s.cpu_total);
+        self.core_hist.resize_with(s.cores.len(), Hist::new);
+        for (h, &v) in self.core_hist.iter_mut().zip(&s.cores) {
+            push(h, v);
+        }
+        push(&mut self.freq_hist, s.cpu_freq as f32);
+        push(&mut self.load_hist, s.load.0 as f32);
+        push(&mut self.mem_hist, s.mem_pct());
+        push(&mut self.cache_hist, pct(s.meminfo.cache(), s.meminfo.total));
+        push(&mut self.swap_hist, s.swap_pct());
+        push(&mut self.rx_hist, s.rx_rate);
+        push(&mut self.tx_hist, s.tx_rate);
+        push(&mut self.disk_r_hist, s.disk_read_rate);
+        push(&mut self.disk_w_hist, s.disk_write_rate);
+        for n in &s.nets {
+            let e = self.net_hist.entry(n.name.clone()).or_default();
+            push(&mut e.0, n.rx_rate);
+            push(&mut e.1, n.tx_rate);
+        }
+        for d in &s.devs {
+            let e = self.dev_hist.entry(d.name.clone()).or_default();
+            push(&mut e.0, d.read_rate);
+            push(&mut e.1, d.write_rate);
+        }
+        for t in &s.temps {
+            push(self.temp_hist.entry(t.label.clone()).or_default(), t.value);
+        }
+        let n = s.gpus.len();
+        self.gpu_hist.resize_with(n, Hist::new);
+        self.vram_hist.resize_with(n, Hist::new);
+        for (i, g) in s.gpus.iter().enumerate() {
             push(&mut self.gpu_hist[i], g.busy.unwrap_or(0.0));
             push(&mut self.vram_hist[i], g.vram_pct());
+            let d = self.gpu_detail.entry(g.id.clone()).or_default();
+            push(&mut d.busy, g.busy.unwrap_or(0.0));
+            push(&mut d.vram, g.vram_pct());
+            push(&mut d.temp, g.temp.unwrap_or(0.0));
+            push(&mut d.power, g.power_w.unwrap_or(0.0));
+            push(&mut d.clock, g.clock_mhz.unwrap_or(0.0));
         }
     }
 
@@ -344,10 +588,20 @@ impl Monitor {
                 SortBy::Time => b.time.cmp(&a.time),
                 SortBy::Pid => a.pid.cmp(&b.pid),
                 SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortBy::Disk => (b.disk_read + b.disk_write).total_cmp(&(a.disk_read + a.disk_write)),
             };
             if reverse { o.reverse() } else { o }
         });
         idx
+    }
+
+    /// Los `n` procesos que más consumen según `sort`.
+    pub fn top(&self, sort: SortBy, n: usize) -> Vec<&Proc> {
+        self.view("", sort, false).into_iter().take(n).map(|i| &self.procs[i]).collect()
+    }
+
+    pub fn proc(&self, pid: u32) -> Option<&Proc> {
+        self.procs.iter().find(|p| p.pid == pid)
     }
 
     /// Manda SIGTERM (o SIGKILL si `force`). Devuelve true si se pudo.
@@ -366,6 +620,32 @@ impl Default for Monitor {
     }
 }
 
+/// Nombres de sensores más legibles.
+fn pretty_sensor(label: &str) -> String {
+    let l = label.trim();
+    let map = [
+        ("Tctl", "CPU (Tctl)"),
+        ("Tdie", "CPU (Tdie)"),
+        ("edge", "GPU integrada"),
+        ("junction", "GPU (junction)"),
+        ("Composite", "NVMe"),
+        ("Sensor 1", "NVMe sensor 1"),
+        ("Sensor 2", "NVMe sensor 2"),
+        ("spd5118 temp1", "RAM"),
+        ("acpitz temp1", "Placa (ACPI 1)"),
+        ("acpitz temp2", "Placa (ACPI 2)"),
+    ];
+    for (k, v) in map {
+        if l == k || l.ends_with(&format!(" {k}")) {
+            return v.to_string();
+        }
+    }
+    if l.starts_with("Package id") {
+        return "CPU (Package)".into();
+    }
+    l.to_string()
+}
+
 /// "AMD Ryzen 7 7445HS w/ Radeon 740M Graphics" -> "Ryzen 7 7445HS"
 /// "Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz" -> "Core i7-10750H"
 pub fn short_cpu_name(brand: &str) -> String {
@@ -378,7 +658,7 @@ pub fn short_cpu_name(brand: &str) -> String {
     for junk in ["(R)", "(TM)", "(tm)", "AMD ", "Intel ", " Processor", " CPU", "-Core", " Core Processor"] {
         s = s.replace(junk, "");
     }
-    // "Ryzen 7 7840HS 8" (cores al final) -> fuera
+    // "Ryzen 9 5900X 12" (cores al final) -> fuera
     let mut w: Vec<&str> = s.split_whitespace().collect();
     if w.len() > 3 && w.last().is_some_and(|t| t.len() <= 3 && t.chars().all(|c| c.is_ascii_digit())) {
         w.pop();
@@ -389,12 +669,18 @@ pub fn short_cpu_name(brand: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::short_cpu_name;
+    use super::*;
     #[test]
     fn cpu_names() {
         assert_eq!(short_cpu_name("AMD Ryzen 7 7445HS w/ Radeon 740M Graphics"), "Ryzen 7 7445HS");
         assert_eq!(short_cpu_name("Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz"), "Core i7-10750H");
         assert_eq!(short_cpu_name("AMD Ryzen 9 5900X 12-Core Processor"), "Ryzen 9 5900X");
+    }
+    #[test]
+    fn sensors() {
+        assert_eq!(pretty_sensor("Tctl"), "CPU (Tctl)");
+        assert_eq!(pretty_sensor("nvme Composite"), "NVMe");
+        assert_eq!(pretty_sensor("raro"), "raro");
     }
 }
 
@@ -404,3 +690,4 @@ fn push<T>(q: &mut VecDeque<T>, v: T) {
     }
     q.push_back(v);
 }
+
