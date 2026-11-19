@@ -172,8 +172,14 @@ pub struct Config {
     pub refresh_ms: u64,
     pub show_graphs: bool,
     pub show_cmd: bool,
+    /// CPU de cada proceso como % de un núcleo (estilo htop) en vez de % del total
+    pub cpu_per_core: bool,
+    /// columnas visibles en la tabla de procesos (GUI)
+    pub columns: Vec<String>,
     pub colors: ColorOverrides,
 }
+
+pub const DEFAULT_COLUMNS: [&str; 5] = ["name", "cpu", "mem", "gpu", "disk"];
 
 impl Default for Config {
     fn default() -> Self {
@@ -182,6 +188,8 @@ impl Default for Config {
             refresh_ms: 1000,
             show_graphs: true,
             show_cmd: false,
+            cpu_per_core: false,
+            columns: DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect(),
             colors: ColorOverrides::default(),
         }
     }

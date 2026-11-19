@@ -8,8 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2};
-use kit::{c, caption, paint_meter, paint_spark, tail_f32, tail_f64, Grad};
+use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Key, Layout, RichText, Sense, Stroke, Ui, Vec2};
+use kit::{body, c, meta, muted, Grad};
 use rtop_core::{config::THEMES, fmt::human, Config, Monitor, ProcDetails, Rgb, SortBy, Theme};
 
 /// muestras visibles en los gráficos
@@ -26,23 +26,6 @@ pub enum Page {
     Sensors,
 }
 
-impl Page {
-    fn title(self, app: &App) -> String {
-        match self {
-            Page::Home => "Inicio".into(),
-            Page::Cpu => "CPU".into(),
-            Page::Gpu(i) => match app.mon.stats.gpus.get(i) {
-                Some(g) => format!("GPU {} · {}", i + 1, g.short_name()),
-                None => format!("GPU {}", i + 1),
-            },
-            Page::Mem => "Memoria".into(),
-            Page::Disk => "Disco".into(),
-            Page::Net => "Red".into(),
-            Page::Sensors => "Temperaturas".into(),
-        }
-    }
-}
-
 struct App {
     mon: Monitor,
     cfg: Config,
@@ -54,6 +37,7 @@ struct App {
     reverse: bool,
     filter: String,
     selected: Option<u32>,
+    scroll_to: Option<usize>,
     details: Option<(u32, ProcDetails)>,
     /// historial de CPU y RAM del proceso seleccionado
     sel_cpu: VecDeque<f32>,
@@ -62,10 +46,12 @@ struct App {
     /// pedidos desde páginas que no tienen `&mut self`
     kill_req: RefCell<Option<(u32, String)>>,
     goto: Cell<Option<Page>>,
+    select_req: Cell<Option<u32>>,
     show_settings: bool,
+    show_keys: bool,
     paused: bool,
     last: Instant,
-    flash: Option<(String, Instant)>,
+    flash: Option<(String, bool, Instant)>,
     visuals_for: Option<Theme>,
     started: Instant,
     shot_requested: bool,
@@ -95,13 +81,16 @@ impl App {
             reverse: false,
             filter: String::new(),
             selected: None,
+            scroll_to: None,
             details: None,
             sel_cpu: VecDeque::new(),
             sel_mem: VecDeque::new(),
             confirm_kill: None,
             kill_req: RefCell::new(None),
             goto: Cell::new(None),
+            select_req: Cell::new(None),
             show_settings: false,
+            show_keys: std::env::var_os("RTOP_KEYS").is_some(),
             paused: false,
             last: Instant::now(),
             flash: None,
@@ -121,8 +110,8 @@ impl App {
         self.view = self.mon.view(&self.filter, self.sort, self.reverse);
     }
 
-    fn msg(&mut self, m: impl Into<String>) {
-        self.flash = Some((m.into(), Instant::now()));
+    fn msg(&mut self, m: impl Into<String>, ok: bool) {
+        self.flash = Some((m.into(), ok, Instant::now()));
     }
 
     fn select(&mut self, pid: Option<u32>) {
@@ -159,6 +148,29 @@ impl App {
         self.page = p;
     }
 
+    /// Orden de la barra lateral; también define los atajos 1..8.
+    fn pages(&self) -> Vec<Page> {
+        let mut v = vec![Page::Home, Page::Cpu];
+        v.extend((0..self.mon.stats.gpus.len()).map(Page::Gpu));
+        v.extend([Page::Mem, Page::Disk, Page::Net, Page::Sensors]);
+        v
+    }
+
+    fn page_title(&self, p: Page) -> String {
+        match p {
+            Page::Home => "Inicio".into(),
+            Page::Cpu => "Procesador".into(),
+            Page::Gpu(i) => match self.mon.stats.gpus.get(i) {
+                Some(g) => g.short_name(),
+                None => format!("GPU {}", i + 1),
+            },
+            Page::Mem => "Memoria".into(),
+            Page::Disk => "Disco".into(),
+            Page::Net => "Red".into(),
+            Page::Sensors => "Temperaturas".into(),
+        }
+    }
+
     fn apply_visuals(&mut self, ctx: &egui::Context) {
         if self.visuals_for.as_ref() == Some(&self.th) {
             return;
@@ -173,21 +185,30 @@ impl App {
         v.selection.bg_fill = c(th.sel);
         v.selection.stroke = Stroke::new(1.0, c(th.accent));
         v.hyperlink_color = c(th.accent);
+        v.text_cursor.stroke = Stroke::new(2.0, c(th.accent));
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c(th.sel));
         v.widgets.inactive.bg_fill = c(th.sel);
         v.widgets.inactive.weak_bg_fill = c(th.sel);
-        v.widgets.hovered.bg_fill = c(th.dim);
-        v.widgets.hovered.weak_bg_fill = c(th.dim);
+        v.widgets.hovered.bg_fill = kit::blend(th.sel, th.dim);
+        v.widgets.hovered.weak_bg_fill = kit::blend(th.sel, th.dim);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, c(th.accent).gamma_multiply(0.6));
         v.widgets.active.bg_fill = c(th.accent);
         v.widgets.active.weak_bg_fill = c(th.accent);
         ctx.set_visuals(v);
+        ctx.global_style_mut(|s| {
+            s.text_styles.insert(egui::TextStyle::Body, FontId::proportional(kit::T_BODY));
+            s.text_styles.insert(egui::TextStyle::Button, FontId::proportional(13.5));
+            s.text_styles.insert(egui::TextStyle::Small, FontId::proportional(kit::T_META));
+            s.spacing.button_padding = Vec2::new(10.0, 5.0);
+            s.spacing.interact_size.y = 28.0;
+        });
         self.visuals_for = Some(self.th.clone());
     }
 
     fn save_cfg(&mut self) {
         self.th = self.cfg.theme();
         if let Err(e) = self.cfg.save() {
-            self.msg(format!("no pude guardar la config: {e}"));
+            self.msg(format!("No pude guardar la configuración: {e}"), false);
         }
     }
 
@@ -206,105 +227,63 @@ impl App {
     fn nav(&mut self, ui: &mut Ui) {
         let th = self.th.clone();
         let s = &self.mon.stats;
-        let m = &self.mon;
-        struct Item {
-            page: Page,
-            title: String,
-            value: String,
-            pct: Option<f32>,
-            spark: Vec<f32>,
-            spark_max: Option<f32>,
-            grad: Grad,
-        }
-        let mut items = vec![Item {
-            page: Page::Cpu,
-            title: "CPU".into(),
-            value: format!("{:.0}%", s.cpu_total),
-            pct: Some(s.cpu_total),
-            spark: tail_f32(&m.cpu_hist, 60),
-            spark_max: Some(100.0),
-            grad: Grad::Heat,
-        }];
-        for (i, g) in s.gpus.iter().enumerate() {
-            items.push(Item {
-                page: Page::Gpu(i),
-                title: format!("GPU {} · {}", i + 1, g.short_name()),
-                value: if g.asleep { "dormida".into() } else { format!("{:.0}%", g.busy.unwrap_or(0.0)) },
-                pct: if g.asleep { None } else { g.busy },
-                spark: m.gpu_hist.get(i).map(|h| tail_f32(h, 60)).unwrap_or_default(),
-                spark_max: Some(100.0),
-                grad: Grad::Heat,
-            });
-        }
-        items.push(Item {
-            page: Page::Mem,
-            title: "Memoria".into(),
-            value: format!("{} / {}", human(s.mem_used), human(s.mem_total)),
-            pct: Some(s.mem_pct()),
-            spark: tail_f32(&m.mem_hist, 60),
-            spark_max: Some(100.0),
-            grad: Grad::Mono(th.mem),
-        });
-        items.push(Item {
-            page: Page::Disk,
-            title: "Disco".into(),
-            value: format!("{}/s", human((s.disk_read_rate + s.disk_write_rate) as u64)),
-            pct: None,
-            spark: m.disk_r_hist.iter().zip(&m.disk_w_hist).rev().take(60).rev().map(|(a, b)| (a + b) as f32).collect(),
-            spark_max: None,
-            grad: Grad::Mono(th.accent),
-        });
-        items.push(Item {
-            page: Page::Net,
-            title: "Red".into(),
-            value: format!("v {}/s", human(s.rx_rate as u64)),
-            pct: None,
-            spark: tail_f64(&m.rx_hist, 60),
-            spark_max: None,
-            grad: Grad::Mono(th.ok),
-        });
-        let main_temp = s.cpu_temp.or(s.temp_max);
-        items.push(Item {
-            page: Page::Sensors,
-            title: "Temperaturas".into(),
-            value: main_temp.map(|t| format!("{t:.0}°C")).unwrap_or("-".into()),
-            pct: main_temp,
-            spark: s
-                .temps
-                .iter()
-                .find(|t| Some(t.value) == main_temp)
-                .and_then(|t| m.temp_hist.get(&t.label))
-                .map(|h| tail_f32(h, 60))
-                .unwrap_or_default(),
-            spark_max: Some(100.0),
-            grad: Grad::Heat,
-        });
+        let heat = |v: f32| Grad::Heat.at(&th, v / 100.0);
+        let value = |p: Page| -> (String, Color32) {
+            match p {
+                Page::Home => (String::new(), muted(&th)),
+                Page::Cpu => (format!("{:.0}%", s.cpu_total), heat(s.cpu_total)),
+                Page::Gpu(i) => match s.gpus.get(i) {
+                    Some(g) if g.asleep => ("dormida".into(), c(th.ok)),
+                    Some(g) => (format!("{:.0}%", g.busy.unwrap_or(0.0)), heat(g.busy.unwrap_or(0.0))),
+                    None => (String::new(), muted(&th)),
+                },
+                Page::Mem => (format!("{:.0}%", s.mem_pct()), heat(s.mem_pct())),
+                Page::Disk => (format!("{}/s", human((s.disk_read_rate + s.disk_write_rate) as u64)), muted(&th)),
+                Page::Net => (format!("{}/s", human((s.rx_rate + s.tx_rate) as u64)), muted(&th)),
+                Page::Sensors => {
+                    let t = s.cpu_temp.or(s.temp_max);
+                    (t.map(|t| format!("{t:.0} °C")).unwrap_or_default(), t.map(heat).unwrap_or(muted(&th)))
+                }
+            }
+        };
 
-        ui.add_space(4.0);
-        ui.label(RichText::new("rtop").size(20.0).strong().color(c(th.accent)));
         ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.label(kit::strong("rtop", c(th.text), 18.0));
+            ui.label(meta(&th, &s.host));
+        });
+        ui.add_space(14.0);
 
         let mut clicked = None;
-        // Inicio: separado y siempre arriba
-        if nav_button(ui, &th, self.page == Page::Home, "Inicio", &s.host, 44.0, |_, _| {}).clicked() {
-            clicked = Some(Page::Home);
-        }
-        ui.add_space(8.0);
-        ui.label(caption(&th, "Componentes"));
-        ui.add_space(2.0);
-        for it in &items {
-            let active = self.page == it.page;
-            let vcol = it.pct.map(|v| it.grad.at(&th, v / 100.0));
-            let resp = nav_button_colored(ui, &th, active, &it.title, &it.value, vcol, 58.0, |p, inner| {
-                if !it.spark.is_empty() {
-                    paint_spark(p, &th, inner, &it.spark, it.spark_max, it.grad);
-                } else if let Some(v) = it.pct {
-                    let r = Rect::from_min_size(inner.left_top() + Vec2::new(0.0, 4.0), Vec2::new(inner.width(), 8.0));
-                    paint_meter(p, &th, r, v, it.grad);
-                }
-            });
+        for (n, p) in self.pages().iter().enumerate() {
+            // separación entre grupos: Inicio | componentes | temperaturas
+            if matches!(p, Page::Cpu | Page::Sensors) {
+                ui.add_space(10.0);
+            }
+            let active = self.page == *p;
+            let w = ui.available_width();
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 36.0), Sense::click());
+            let painter = ui.painter();
+            let fill = if active {
+                c(th.sel)
+            } else if resp.hovered() {
+                c(th.sel).gamma_multiply(0.45)
+            } else {
+                Color32::TRANSPARENT
+            };
+            painter.rect_filled(rect, CornerRadius::same(8), fill);
+            let font = if active {
+                FontId::new(kit::T_BODY, egui::FontFamily::Name("semibold".into()))
+            } else {
+                FontId::proportional(kit::T_BODY)
+            };
+            painter.text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, self.page_title(*p), font, c(th.text));
+            let (v, col) = value(*p);
+            painter.text(rect.right_center() - Vec2::new(12.0, 0.0), Align2::RIGHT_CENTER, v, FontId::proportional(13.0), col);
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Tecla {}", n + 1));
             if resp.clicked() {
-                clicked = Some(it.page);
+                clicked = Some(*p);
             }
         }
         if let Some(pg) = clicked {
@@ -313,48 +292,115 @@ impl App {
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(4.0);
-            ui.label(dim_small(&th, "Esc o Alt + flecha izquierda: volver al inicio"));
             ui.horizontal(|ui| {
+                let lbl = if self.paused { "Reanudar" } else { "Pausar" };
+                if ui.button(lbl).on_hover_text("Espacio").clicked() {
+                    self.paused = !self.paused;
+                }
                 if ui.button("Ajustes").clicked() {
                     self.show_settings = !self.show_settings;
                 }
-                let lbl = if self.paused { "Reanudar" } else { "Pausar" };
-                if ui.button(lbl).clicked() {
-                    self.paused = !self.paused;
+                if ui.button("Atajos").on_hover_text("F1").clicked() {
+                    self.show_keys = !self.show_keys;
                 }
             });
-            if let Some((m, t)) = &self.flash {
-                if t.elapsed() < Duration::from_secs(4) {
-                    ui.label(RichText::new(m).color(c(self.th.warn)).size(11.0));
-                }
-            }
         });
     }
 
-    /// Barra de arriba de las páginas de detalle, con el botón para volver.
+    /// Encabezado de las páginas de detalle, con el botón para volver.
     fn page_bar(&mut self, ui: &mut Ui) {
         let th = self.th.clone();
-        let title = self.page.title(self);
+        let title = self.page_title(self.page);
         ui.horizontal(|ui| {
-            let back = egui::Button::new(RichText::new("‹  Inicio").size(14.0).color(c(th.text)))
-                .fill(c(th.panel))
-                .corner_radius(CornerRadius::same(8))
-                .min_size(Vec2::new(96.0, 30.0));
-            if ui.add(back).on_hover_text("volver a la pantalla principal (Esc)").clicked() {
+            let back = egui::Button::new(body(&th, "‹  Inicio")).corner_radius(CornerRadius::same(8)).min_size(Vec2::new(92.0, 32.0));
+            if ui.add(back).on_hover_text("Volver a la pantalla principal (Esc)").clicked() {
                 self.go(Page::Home);
             }
-            ui.add_space(8.0);
-            ui.label(RichText::new(title).size(20.0).strong().color(c(th.text)));
+            ui.add_space(10.0);
+            ui.label(kit::title(&th, title));
         });
+    }
+
+    fn pause_banner(&mut self, ui: &mut Ui) {
+        if !self.paused {
+            return;
+        }
+        let th = self.th.clone();
+        egui::Frame::new()
+            .fill(c(th.warn).gamma_multiply(0.18))
+            .stroke(Stroke::new(1.0, c(th.warn).gamma_multiply(0.5)))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(kit::strong("En pausa", c(th.warn), kit::T_BODY));
+                    ui.label(body(&th, format!("los datos son de hace {} s", self.last.elapsed().as_secs())));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Reanudar").clicked() {
+                            self.paused = false;
+                        }
+                    });
+                });
+            });
     }
 
     // ---------- ventanas ----------
 
+    fn toast(&mut self, ctx: &egui::Context) {
+        let Some((m, ok, t)) = self.flash.clone() else { return };
+        if t.elapsed() > Duration::from_secs(5) {
+            self.flash = None;
+            return;
+        }
+        let th = &self.th;
+        let col = if ok { c(th.ok) } else { c(th.hot) };
+        egui::Area::new(egui::Id::new("toast")).anchor(Align2::CENTER_BOTTOM, Vec2::new(-118.0, -24.0)).show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(c(th.panel))
+                .stroke(Stroke::new(1.0, col))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(16, 10))
+                .show(ui, |ui| {
+                    ui.label(body(th, m));
+                });
+        });
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    fn keys_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_keys;
+        let th = self.th.clone();
+        egui::Window::new("Atajos de teclado").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            let rows = [
+                ("1 a 8", "ir a cada sección (en el orden de la barra)"),
+                ("Esc", "volver a Inicio, o cerrar el detalle del proceso"),
+                ("Alt + flecha izquierda", "volver a Inicio"),
+                ("Flechas o j / k", "moverse por la tabla de procesos"),
+                ("Re Pág / Av Pág", "saltar de a 15 procesos"),
+                ("/", "buscar un proceso"),
+                ("Supr", "terminar el proceso elegido (pide confirmación)"),
+                ("Espacio", "pausar o reanudar"),
+                ("F1", "mostrar esta ayuda"),
+            ];
+            egui::Grid::new("keys").num_columns(2).spacing([24.0, 8.0]).show(ui, |ui| {
+                for (k, d) in rows {
+                    ui.label(kit::num(k, c(th.accent)));
+                    ui.label(body(&th, d));
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(meta(&th, "En la tabla: click en un título para ordenar, click derecho en un proceso para terminarlo."));
+        });
+        self.show_keys = open;
+    }
+
     fn settings(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut changed = false;
-        egui::Window::new("Ajustes").open(&mut open).resizable(false).default_width(320.0).show(ctx, |ui| {
-            egui::Grid::new("cfg").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        egui::Window::new("Ajustes").open(&mut open).resizable(false).default_width(340.0).show(ctx, |ui| {
+            egui::Grid::new("cfg").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
                 ui.label("Tema");
                 egui::ComboBox::from_id_salt("theme").selected_text(self.cfg.theme.clone()).show_ui(ui, |ui| {
                     for t in THEMES {
@@ -366,36 +412,44 @@ impl App {
                 });
                 ui.end_row();
 
-                ui.label("Refresco (ms)");
+                ui.label("Actualizar cada");
                 let mut ms = self.cfg.refresh_ms();
-                if ui.add(egui::Slider::new(&mut ms, 250..=5000).step_by(250.0)).changed() {
+                if ui.add(egui::Slider::new(&mut ms, 250..=5000).step_by(250.0).suffix(" ms")).changed() {
                     self.cfg.refresh_ms = ms;
                     changed = true;
                 }
                 ui.end_row();
 
-                ui.label("Comando completo");
-                changed |= ui.checkbox(&mut self.cfg.show_cmd, "mostrar").changed();
+                ui.label("CPU de cada proceso");
+                let mut v = self.cfg.cpu_per_core;
+                ui.vertical(|ui| {
+                    ui.radio_value(&mut v, false, "% del total");
+                    ui.radio_value(&mut v, true, "% de un núcleo");
+                });
+                if v != self.cfg.cpu_per_core {
+                    self.cfg.cpu_per_core = v;
+                    changed = true;
+                }
                 ui.end_row();
             });
 
             ui.separator();
-            ui.label(RichText::new("Colores personalizados").color(c(self.th.accent)).strong());
-            ui.label(RichText::new("pisan los del tema; se guardan en la config").color(c(self.th.dim)).small());
+            ui.label(kit::section_title(&self.th, "Colores"));
+            ui.label(meta(&self.th, "Pisan los del tema y se guardan en la configuración."));
             let th = self.th.clone();
             egui::Grid::new("colors").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
                 let ov = &mut self.cfg.colors;
                 for (name, cur, slot) in [
-                    ("fondo", th.bg, &mut ov.bg),
-                    ("paneles", th.panel, &mut ov.panel),
-                    ("texto", th.text, &mut ov.text),
-                    ("tenue", th.dim, &mut ov.dim),
-                    ("acento", th.accent, &mut ov.accent),
-                    ("ok", th.ok, &mut ov.ok),
-                    ("alerta", th.warn, &mut ov.warn),
-                    ("crítico", th.hot, &mut ov.hot),
-                    ("selección", th.sel, &mut ov.sel),
-                    ("memoria", th.mem, &mut ov.mem),
+                    ("Fondo", th.bg, &mut ov.bg),
+                    ("Paneles", th.panel, &mut ov.panel),
+                    ("Texto", th.text, &mut ov.text),
+                    ("Tenue", th.dim, &mut ov.dim),
+                    ("Acento", th.accent, &mut ov.accent),
+                    ("Bien", th.ok, &mut ov.ok),
+                    ("Alerta", th.warn, &mut ov.warn),
+                    ("Crítico", th.hot, &mut ov.hot),
+                    ("Selección", th.sel, &mut ov.sel),
+                    ("Memoria", th.mem, &mut ov.mem),
                 ] {
                     ui.label(name);
                     let mut rgb = [cur.0, cur.1, cur.2];
@@ -404,7 +458,7 @@ impl App {
                         changed = true;
                     }
                     if slot.is_some() {
-                        if ui.small_button("reset").clicked() {
+                        if ui.small_button("Quitar").clicked() {
                             *slot = None;
                             changed = true;
                         }
@@ -421,7 +475,7 @@ impl App {
                     changed = true;
                 }
                 if let Some(p) = Config::path() {
-                    ui.label(RichText::new(p.display().to_string()).color(c(self.th.dim)).small());
+                    ui.label(meta(&self.th, p.display().to_string()));
                 }
             });
         });
@@ -434,26 +488,32 @@ impl App {
     fn confirm(&mut self, ctx: &egui::Context) {
         let Some((pid, name)) = self.confirm_kill.clone() else { return };
         let mut action: Option<Option<bool>> = None; // Some(None)=cancelar, Some(Some(force))
-        let hot = c(self.th.hot);
+        let th = self.th.clone();
         let resp = egui::Modal::new(egui::Id::new("kill")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            ui.heading("Matar proceso");
-            ui.add_space(6.0);
+            ui.set_width(380.0);
+            ui.label(kit::section_title(&th, format!("¿Terminar {name}?")));
+            ui.label(meta(&th, format!("PID {pid}. Si tiene trabajo sin guardar, se pierde.")));
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&name).color(hot).strong());
-                ui.label(format!("(pid {pid})"));
-            });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Terminar (TERM)").clicked() {
-                    action = Some(Some(false));
-                }
-                if ui.button(RichText::new("Forzar (KILL)").color(hot)).clicked() {
-                    action = Some(Some(true));
-                }
                 if ui.button("Cancelar").clicked() {
                     action = Some(None);
                 }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .button(RichText::new("Forzar").color(c(th.hot)))
+                        .on_hover_text("SIGKILL: lo corta en seco, para cuando no responde")
+                        .clicked()
+                    {
+                        action = Some(Some(true));
+                    }
+                    if ui
+                        .add(egui::Button::new(RichText::new("Terminar").color(c(th.bg))).fill(c(th.hot)))
+                        .on_hover_text("SIGTERM: le pide que cierre")
+                        .clicked()
+                    {
+                        action = Some(Some(false));
+                    }
+                });
             });
         });
         if resp.should_close() && action.is_none() {
@@ -462,11 +522,10 @@ impl App {
         if let Some(a) = action {
             self.confirm_kill = None;
             if let Some(force) = a {
-                let s = if force { "SIGKILL" } else { "SIGTERM" };
                 if self.mon.kill(pid, force) {
-                    self.msg(format!("{s} -> {name} ({pid})"));
+                    self.msg(format!("Le pedí a {name} que termine."), true);
                 } else {
-                    self.msg(format!("no pude matar {name} ({pid}) - permisos?"));
+                    self.msg(format!("No pude terminar {name}: es de otro usuario o del sistema. Probá con sudo."), false);
                 }
             }
         }
@@ -499,92 +558,41 @@ impl App {
         }
     }
 
-    /// Volver al inicio con Esc, Alt+← o el botón "atrás" del mouse.
-    fn back_shortcuts(&mut self, ctx: &egui::Context) {
+    /// Atajos globales: Esc / Alt+← / botón atrás del mouse, 1..8, Espacio, F1.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.confirm_kill.is_some() || ctx.memory(|m| m.focused().is_some()) {
             return;
         }
-        let (esc, alt_left, mouse_back) = ctx.input(|i| {
+        let (esc, alt_left, mouse_back, space, f1, num) = ctx.input(|i| {
+            let num = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8]
+                .iter()
+                .position(|k| i.key_pressed(*k) && !i.modifiers.any());
             (
-                i.key_pressed(egui::Key::Escape),
-                i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(Key::Escape),
+                i.modifiers.alt && i.key_pressed(Key::ArrowLeft),
                 i.pointer.button_clicked(egui::PointerButton::Extra1),
+                i.key_pressed(Key::Space),
+                i.key_pressed(Key::F1),
+                num,
             )
         });
+        if let Some(n) = num {
+            if let Some(p) = self.pages().get(n) {
+                self.go(*p);
+            }
+        }
+        if space {
+            self.paused = !self.paused;
+        }
+        if f1 {
+            self.show_keys = !self.show_keys;
+        }
         if self.page != Page::Home && (esc || alt_left || mouse_back) {
             self.go(Page::Home);
         } else if self.page == Page::Home && esc {
             self.select(None);
         }
     }
-}
-
-fn dim_small(th: &Theme, t: &str) -> RichText {
-    RichText::new(t).color(c(th.dim)).size(10.5)
-}
-
-fn nav_button(
-    ui: &mut Ui,
-    th: &Theme,
-    active: bool,
-    title: &str,
-    value: &str,
-    h: f32,
-    extra: impl FnOnce(&egui::Painter, Rect),
-) -> egui::Response {
-    nav_button_colored(ui, th, active, title, value, None, h, extra)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn nav_button_colored(
-    ui: &mut Ui,
-    th: &Theme,
-    active: bool,
-    title: &str,
-    value: &str,
-    value_color: Option<Color32>,
-    h: f32,
-    extra: impl FnOnce(&egui::Painter, Rect),
-) -> egui::Response {
-    let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-    let p = ui.painter();
-    let fill = if active {
-        c(th.sel)
-    } else if resp.hovered() {
-        c(th.sel).gamma_multiply(0.5)
-    } else {
-        Color32::TRANSPARENT
-    };
-    p.rect_filled(rect, CornerRadius::same(8), fill);
-    if active {
-        p.rect_filled(
-            Rect::from_min_size(rect.min + Vec2::new(0.0, 8.0), Vec2::new(3.0, h - 16.0)),
-            CornerRadius::same(2),
-            c(th.accent),
-        );
-    }
-    let pad = 12.0;
-    let top = if h < 50.0 { (h - 16.0) / 2.0 } else { 9.0 };
-    p.text(
-        rect.left_top() + Vec2::new(pad, top),
-        Align2::LEFT_TOP,
-        title,
-        FontId::proportional(13.5),
-        if active { c(th.text) } else { c(th.text).gamma_multiply(0.85) },
-    );
-    p.text(
-        rect.right_top() + Vec2::new(-pad, top + 1.0),
-        Align2::RIGHT_TOP,
-        value,
-        FontId::proportional(12.0),
-        value_color.unwrap_or(c(th.dim)),
-    );
-    if h >= 50.0 {
-        let inner = Rect::from_min_max(rect.left_top() + Vec2::new(pad, 32.0), rect.right_bottom() - Vec2::new(pad, 10.0));
-        extra(p, inner);
-    }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 impl eframe::App for App {
@@ -622,20 +630,21 @@ impl eframe::App for App {
             self.refresh();
             self.last = Instant::now();
         }
-        ctx.request_repaint_after(tick.saturating_sub(self.last.elapsed()));
-        self.back_shortcuts(&ctx);
+        ctx.request_repaint_after(if self.paused { Duration::from_secs(1) } else { tick.saturating_sub(self.last.elapsed()) });
+        self.shortcuts(&ctx);
 
         egui::Panel::right("nav")
             .exact_size(236.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(c(self.th.panel)).inner_margin(egui::Margin::symmetric(10, 10)))
+            .frame(egui::Frame::new().fill(kit::layer2(&self.th)).inner_margin(egui::Margin::symmetric(10, 12)))
             .show(ui, |ui| self.nav(ui));
 
         let page = self.page;
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(c(self.th.bg)).inner_margin(12.0))
+            .frame(egui::Frame::new().fill(c(self.th.bg)).inner_margin(egui::Margin::symmetric(16, 14)))
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(10.0, 10.0);
+                ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
+                self.pause_banner(ui);
                 if page == Page::Home {
                     self.page_home(ui);
                     return;
@@ -652,16 +661,23 @@ impl eframe::App for App {
                         Page::Sensors => self.page_sensors(ui),
                         Page::Home => {}
                     }
+                    ui.add_space(8.0);
                 });
             });
 
         if let Some(p) = self.goto.take() {
             self.go(p);
         }
+        if let Some(pid) = self.select_req.take() {
+            self.select(Some(pid));
+            self.scroll_to = self.view.iter().position(|&i| self.mon.procs[i].pid == pid);
+        }
         if let Some(k) = self.kill_req.take() {
             self.confirm_kill = Some(k);
         }
 
+        self.toast(&ctx);
+        self.keys_window(&ctx);
         self.settings(&ctx);
         self.confirm(&ctx);
         self.debug_shot(&ctx);
@@ -692,5 +708,12 @@ fn main() -> eframe::Result {
             .with_min_inner_size([1000.0, 640.0]),
         ..Default::default()
     };
-    eframe::run_native("rtop", opts, Box::new(|_cc| Ok(Box::new(App::new()))))
+    eframe::run_native(
+        "rtop",
+        opts,
+        Box::new(|cc| {
+            kit::install_fonts(&cc.egui_ctx);
+            Ok(Box::new(App::new()))
+        }),
+    )
 }
