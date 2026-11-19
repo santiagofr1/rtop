@@ -9,7 +9,7 @@ use rtop_core::{
 
 use crate::{
     kit::{self, big, c, caption, card, chart, columns, dim, header, kv, meter, ring, tail_f32, tail_f64, ChartOpts, Grad, Series},
-    App, Page,
+    App,
 };
 
 pub fn pct_fmt(v: f64) -> String {
@@ -38,7 +38,7 @@ pub enum Col {
 
 impl App {
     pub(crate) fn opts(&self, height: f32, max: Option<f32>, fmt: fn(f64) -> String) -> ChartOpts {
-        ChartOpts { height, max, fmt, window: crate::WINDOW, step: self.cfg.refresh_ms() as f32 / 1000.0 }
+        ChartOpts { height, max, fmt, window: crate::WINDOW, step: self.cfg.refresh_ms() as f32 / 1000.0, fill: true }
     }
 
     /// Tabla compacta de procesos con click derecho para matar.
@@ -114,226 +114,6 @@ impl App {
                 )
             })
             .collect()
-    }
-
-    // ================= RESUMEN =================
-
-    pub(crate) fn page_overview(&self, ui: &mut Ui) {
-        let th = &self.th;
-        let s = &self.mon.stats;
-        let m = &self.mon;
-
-        ui.horizontal(|ui| {
-            ui.label(big(&s.host, c(th.text), 26.0));
-            ui.add_space(10.0);
-            ui.label(dim(
-                th,
-                format!("{} · kernel {} · encendida hace {} · {} procesos", s.os, s.kernel, hms(s.uptime), s.tasks),
-            ));
-        });
-
-        // anillos
-        struct R {
-            page: Page,
-            title: String,
-            pct: Option<f32>,
-            center: String,
-            sub: String,
-            grad: Grad,
-        }
-        let mut rings = vec![
-            R {
-                page: Page::Cpu,
-                title: "CPU".into(),
-                pct: Some(s.cpu_total),
-                center: format!("{:.0}%", s.cpu_total),
-                sub: format!("{} · {:.1} GHz", s.cpu_model, s.cpu_freq as f32 / 1000.0),
-                grad: Grad::Heat,
-            },
-            R {
-                page: Page::Mem,
-                title: "Memoria".into(),
-                pct: Some(s.mem_pct()),
-                center: format!("{:.0}%", s.mem_pct()),
-                sub: format!("{} / {}", human(s.mem_used), human(s.mem_total)),
-                grad: Grad::Heat,
-            },
-        ];
-        for (i, g) in s.gpus.iter().enumerate() {
-            rings.push(R {
-                page: Page::Gpu(i),
-                title: g.short_name(),
-                pct: g.busy.filter(|_| !g.asleep),
-                center: if g.asleep { "zzz".into() } else { format!("{:.0}%", g.busy.unwrap_or(0.0)) },
-                sub: if g.asleep {
-                    "dormida".into()
-                } else {
-                    format!("VRAM {} / {}", human(g.vram_used), human(g.vram_total))
-                },
-                grad: Grad::Heat,
-            });
-        }
-        rings.push(R {
-            page: Page::Disk,
-            title: "Disco /".into(),
-            pct: Some(s.disk_pct()),
-            center: format!("{:.0}%", s.disk_pct()),
-            sub: format!("{} / {}", human(s.disk_used), human(s.disk_total)),
-            grad: Grad::Heat,
-        });
-        if let Some(t) = s.cpu_temp {
-            rings.push(R {
-                page: Page::Sensors,
-                title: "Temp CPU".into(),
-                pct: Some(t),
-                center: format!("{t:.0}°"),
-                sub: format!("máx {:.0}°C", s.temp_max.unwrap_or(t)),
-                grad: Grad::Heat,
-            });
-        }
-        let n = rings.len();
-        columns(ui, n, n, 10.0, |ui, i| {
-            let r = &rings[i];
-            card(ui, th, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(caption(th, &r.title));
-                    let size = (ui.available_width() - 10.0).clamp(80.0, 130.0);
-                    let resp = ring(ui, th, size, r.pct, &r.center, r.grad)
-                        .on_hover_text("click para ver el detalle")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if resp.clicked() {
-                        self.goto.set(Some(r.page));
-                    }
-                    ui.label(dim(th, &r.sub).size(12.0));
-                });
-            });
-        });
-
-        // gráficos
-        columns(ui, 3, 3, 10.0, |ui, i| {
-            card(ui, th, |ui| match i {
-                0 => {
-                    header(ui, th, "CPU", big(format!("{:.0}%", s.cpu_total), kit::Grad::Heat.at(th, s.cpu_total / 100.0), 18.0));
-                    chart(ui, th, &self.opts(110.0, Some(100.0), pct_fmt), &[Series::new("CPU", tail_f32(&m.cpu_hist, crate::WINDOW), Grad::Heat)], None);
-                }
-                1 => {
-                    header(ui, th, "Memoria", big(format!("{:.0}%", s.mem_pct()), kit::Grad::Heat.at(th, s.mem_pct() / 100.0), 18.0));
-                    chart(ui, th, &self.opts(110.0, Some(100.0), pct_fmt), &[Series::new("RAM", tail_f32(&m.mem_hist, crate::WINDOW), Grad::Mono(th.mem))], None);
-                }
-                _ => {
-                    header(
-                        ui,
-                        th,
-                        "Red",
-                        RichText::new(format!("v {}/s   ^ {}/s", human(s.rx_rate as u64), human(s.tx_rate as u64))).color(c(th.text)),
-                    );
-                    chart(
-                        ui,
-                        th,
-                        &self.opts(110.0, None, rate_fmt),
-                        &[Series::new("bajada", tail_f64(&m.rx_hist, crate::WINDOW), Grad::Mono(th.ok))],
-                        Some(&Series::new("subida", tail_f64(&m.tx_hist, crate::WINDOW), Grad::Mono(th.warn))),
-                    );
-                }
-            });
-        });
-
-        columns(ui, 3, 3, 10.0, |ui, i| {
-            card(ui, th, |ui| match i {
-                0 => {
-                    let v = s.gpus.iter().find(|g| !g.asleep).and_then(|g| g.busy).unwrap_or(0.0);
-                    header(ui, th, "GPU", big(format!("{v:.0}%"), Grad::Heat.at(th, v / 100.0), 18.0));
-                    let series: Vec<Series> = s
-                        .gpus
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, g)| !g.asleep)
-                        .map(|(i, g)| {
-                            let grad = if i == 0 { Grad::Heat } else { Grad::Mono(th.accent) };
-                            Series::new(g.short_name(), tail_f32(&m.gpu_hist[i], crate::WINDOW), grad)
-                        })
-                        .collect();
-                    chart(ui, th, &self.opts(110.0, Some(100.0), pct_fmt), &series, None);
-                }
-                1 => {
-                    header(
-                        ui,
-                        th,
-                        "Disco",
-                        RichText::new(format!("r {}/s   w {}/s", human(s.disk_read_rate as u64), human(s.disk_write_rate as u64))).color(c(th.text)),
-                    );
-                    chart(
-                        ui,
-                        th,
-                        &self.opts(110.0, None, rate_fmt),
-                        &[Series::new("lectura", tail_f64(&m.disk_r_hist, crate::WINDOW), Grad::Mono(th.accent))],
-                        Some(&Series::new("escritura", tail_f64(&m.disk_w_hist, crate::WINDOW), Grad::Mono(th.mem))),
-                    );
-                }
-                _ => {
-                    let g = s.gpus.iter().find(|g| !g.asleep && g.vram_total > 0);
-                    header(
-                        ui,
-                        th,
-                        "VRAM",
-                        g.map(|g| RichText::new(format!("{} / {}", human(g.vram_used), human(g.vram_total))).color(c(th.mem)))
-                            .unwrap_or_else(|| dim(th, "-")),
-                    );
-                    let series: Vec<Series> = s
-                        .gpus
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, g)| !g.asleep)
-                        .map(|(i, g)| {
-                            let grad = if i == 0 { Grad::Mono(th.mem) } else { Grad::Mono(th.accent) };
-                            Series::new(g.short_name(), tail_f32(&m.vram_hist[i], crate::WINDOW), grad)
-                        })
-                        .collect();
-                    chart(ui, th, &self.opts(110.0, Some(100.0), pct_fmt), &series, None);
-                }
-            });
-        });
-
-        // top procesos + temperaturas
-        columns(ui, 3, 3, 10.0, |ui, i| {
-            card(ui, th, |ui| match i {
-                0 => {
-                    ui.label(caption(th, "Más CPU"));
-                    let top = m.top(SortBy::Cpu, 6);
-                    self.proc_table(ui, "ov_cpu", &["PID", "Nombre", "CPU", "RAM", "Usuario"], self.cpu_rows(&top));
-                }
-                1 => {
-                    ui.label(caption(th, "Más memoria"));
-                    let top = m.top(SortBy::Mem, 6);
-                    self.proc_table(ui, "ov_mem", &["PID", "Nombre", "RAM", "Tamaño", "Usuario"], self.mem_rows(&top));
-                }
-                _ => {
-                    ui.label(caption(th, "Temperaturas"));
-                    self.temp_list(ui, 7);
-                }
-            });
-        });
-    }
-
-    fn temp_list(&self, ui: &mut Ui, max: usize) {
-        let th = &self.th;
-        let s = &self.mon.stats;
-        let mut temps: Vec<(String, f32)> = s.temps.iter().map(|t| (t.label.clone(), t.value)).collect();
-        for g in &s.gpus {
-            if g.vendor == rtop_core::Vendor::Nvidia {
-                if let Some(t) = g.temp {
-                    temps.push((g.short_name(), t));
-                }
-            }
-        }
-        egui::Grid::new("temps").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
-            for (label, v) in temps.into_iter().take(max) {
-                ui.label(RichText::new(label).color(c(th.text)));
-                meter(ui, th, 110.0, v, Grad::Heat);
-                ui.label(RichText::new(format!("{v:.0}°C")).strong().color(Grad::Heat.at(th, v / 100.0)));
-                ui.end_row();
-            }
-        });
     }
 
     // ================= CPU =================
@@ -831,24 +611,39 @@ impl App {
         });
     }
 
-    // ================= SENSORES =================
+    // ================= TEMPERATURAS =================
 
     pub(crate) fn page_sensors(&self, ui: &mut Ui) {
         let th = &self.th;
         let s = &self.mon.stats;
         let m = &self.mon;
-        let mut items: Vec<(String, f32, Option<f32>, Option<f32>, Vec<f32>)> = s
+        struct T {
+            label: String,
+            value: f32,
+            max: Option<f32>,
+            crit: Option<f32>,
+            data: Vec<f32>,
+        }
+        let mut items: Vec<T> = s
             .temps
             .iter()
-            .map(|t| {
-                let h = m.temp_hist.get(&t.label).map(|h| tail_f32(h, crate::WINDOW)).unwrap_or_default();
-                (t.label.clone(), t.value, t.max, t.crit, h)
+            .map(|t| T {
+                label: t.label.clone(),
+                value: t.value,
+                max: t.max,
+                crit: t.crit,
+                data: m.temp_hist.get(&t.label).map(|h| tail_f32(h, crate::WINDOW)).unwrap_or_default(),
             })
             .collect();
         for g in &s.gpus {
             if g.vendor == rtop_core::Vendor::Nvidia && !g.asleep {
-                let h = m.gpu_detail.get(&g.id).map(|h| tail_f32(&h.temp, crate::WINDOW)).unwrap_or_default();
-                items.push((g.short_name(), g.temp.unwrap_or(0.0), None, None, h));
+                items.push(T {
+                    label: g.short_name(),
+                    value: g.temp.unwrap_or(0.0),
+                    max: None,
+                    crit: None,
+                    data: m.gpu_detail.get(&g.id).map(|h| tail_f32(&h.temp, crate::WINDOW)).unwrap_or_default(),
+                });
             }
         }
         if items.is_empty() {
@@ -857,19 +652,60 @@ impl App {
             });
             return;
         }
-        columns(ui, items.len(), 3, 10.0, |ui, i| {
-            let (label, v, max, crit, data) = &items[i];
+
+        // todas juntas, una línea por sensor
+        // un color distinto por sensor, repartiendo el círculo de tonos
+        let n_items = items.len().max(1);
+        let palette: Vec<rtop_core::Rgb> = (0..n_items)
+            .map(|i| {
+                let c32: Color32 = egui::ecolor::Hsva::new(i as f32 / n_items as f32, 0.6, 0.95, 1.0).into();
+                rtop_core::Rgb(c32.r(), c32.g(), c32.b())
+            })
+            .collect();
+        card(ui, th, |ui| {
+            let hottest = items.iter().max_by(|a, b| a.value.total_cmp(&b.value)).unwrap();
+            header(
+                ui,
+                th,
+                "Todas las temperaturas",
+                big(format!("{} {:.0}°C", hottest.label, hottest.value), Grad::Heat.at(th, hottest.value / 100.0), 16.0),
+            );
+            let mut o = self.opts(200.0, Some(100.0), temp_fmt);
+            o.fill = false;
+            let series: Vec<Series> = items
+                .iter()
+                .enumerate()
+                .map(|(i, t)| Series::new(t.label.clone(), t.data.clone(), Grad::Mono(palette[i % palette.len()])))
+                .collect();
+            chart(ui, th, &o, &series, None);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                for (i, t) in items.iter().enumerate() {
+                    ui.label(RichText::new(format!("■ {} {:.0}°C", t.label, t.value)).color(c(palette[i % palette.len()])));
+                }
+            });
+        });
+
+        let cols = kit::fit_cols(ui.available_width(), 300.0, items.len());
+        columns(ui, items.len(), cols, 10.0, |ui, i| {
+            let t = &items[i];
             card(ui, th, |ui| {
-                header(ui, th, label, big(format!("{v:.0}°C"), Grad::Heat.at(th, v / 100.0), 18.0));
+                header(ui, th, &t.label, big(format!("{:.0}°C", t.value), Grad::Heat.at(th, t.value / 100.0), 18.0));
                 let mut sub = vec![];
-                if let Some(mx) = max {
+                if let Some(mx) = t.max {
                     sub.push(format!("máx {mx:.0}°C"));
                 }
-                if let Some(cr) = crit {
+                if let Some(cr) = t.crit {
                     sub.push(format!("crítica {cr:.0}°C"));
                 }
                 ui.label(dim(th, if sub.is_empty() { " ".into() } else { sub.join(" · ") }).size(11.0));
-                chart(ui, th, &self.opts(70.0, Some(crit.unwrap_or(100.0).max(100.0)), temp_fmt), &[Series::new(label, data.clone(), Grad::Heat)], None);
+                chart(
+                    ui,
+                    th,
+                    &self.opts(80.0, Some(t.crit.unwrap_or(100.0).max(100.0)), temp_fmt),
+                    &[Series::new(t.label.clone(), t.data.clone(), Grad::Heat)],
+                    None,
+                );
             });
         });
     }

@@ -13,6 +13,10 @@ pub fn c(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
 }
 
+pub fn blend(a: Rgb, b: Rgb) -> Color32 {
+    lerp(c(a), c(b), 0.5)
+}
+
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
@@ -202,6 +206,8 @@ pub struct ChartOpts {
     pub window: usize,
     /// segundos por muestra (para el "hace Xs" del tooltip)
     pub step: f32,
+    /// relleno bajo la línea (false = solo líneas, para varias series juntas)
+    pub fill: bool,
 }
 
 /// Gráfico de área con degradé por altura. Con `down`, la segunda serie se
@@ -255,7 +261,9 @@ pub fn chart(ui: &mut Ui, th: &Theme, o: &ChartOpts, up: &[Series], down: Option
                 mesh.add_triangle(idx - 2, idx + 1, idx);
             }
         }
-        p.add(Shape::mesh(mesh));
+        if o.fill {
+            p.add(Shape::mesh(mesh));
+        }
         for i in 1..n {
             let a = Pos2::new(x(i - 1), y(s.data[i - 1]));
             let b = Pos2::new(x(i), y(s.data[i]));

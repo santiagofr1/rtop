@@ -73,6 +73,50 @@ pub struct Proc {
     /// bytes/s
     pub disk_read: f64,
     pub disk_write: f64,
+    pub parent: Option<u32>,
+    /// segundos desde epoch
+    pub start_time: u64,
+    /// uso de GPU sumado entre todas las placas (None = no usa GPU)
+    pub gpu: Option<f32>,
+    pub vram: u64,
+}
+
+/// Datos extra de un proceso, leídos de `/proc` solo cuando hacen falta.
+#[derive(Clone, Debug, Default)]
+pub struct ProcDetails {
+    pub threads: Option<u32>,
+    pub nice: Option<i32>,
+    pub swap: Option<u64>,
+    pub exe: Option<String>,
+    pub cwd: Option<String>,
+}
+
+impl ProcDetails {
+    pub fn read(pid: u32) -> ProcDetails {
+        let base = format!("/proc/{pid}");
+        let mut d = ProcDetails::default();
+        if let Ok(st) = fs::read_to_string(format!("{base}/status")) {
+            for l in st.lines() {
+                let Some((k, v)) = l.split_once(':') else { continue };
+                let v = v.trim();
+                match k {
+                    "Threads" => d.threads = v.parse().ok(),
+                    "VmSwap" => d.swap = v.split_whitespace().next().and_then(|x| x.parse::<u64>().ok()).map(|kb| kb * 1024),
+                    _ => {}
+                }
+            }
+        }
+        // /proc/pid/stat: el campo 19 es nice (el nombre va entre paréntesis y puede tener espacios)
+        if let Ok(st) = fs::read_to_string(format!("{base}/stat")) {
+            if let Some(rest) = st.rsplit_once(')').map(|(_, r)| r) {
+                d.nice = rest.split_whitespace().nth(16).and_then(|x| x.parse().ok());
+            }
+        }
+        let link = |f: &str| fs::read_link(format!("{base}/{f}")).ok().map(|p| p.to_string_lossy().into_owned());
+        d.exe = link("exe");
+        d.cwd = link("cwd");
+        d
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,6 +127,10 @@ pub enum SortBy {
     Pid,
     Name,
     Disk,
+    User,
+    Gpu,
+    Vram,
+    State,
 }
 
 impl SortBy {
@@ -100,6 +148,10 @@ impl SortBy {
             SortBy::Pid => "PID",
             SortBy::Name => "NOMBRE",
             SortBy::Disk => "DISCO",
+            SortBy::User => "USUARIO",
+            SortBy::Gpu => "GPU%",
+            SortBy::Vram => "VRAM",
+            SortBy::State => "ESTADO",
         }
     }
 }
@@ -448,6 +500,17 @@ impl Monitor {
             .map(|t| t.value);
 
         let gpus = self.gpu.latest();
+        // pid -> (uso sumado, vram sumada) entre todas las GPUs
+        let mut gpu_use: HashMap<u32, (Option<f32>, u64)> = HashMap::new();
+        for g in &gpus {
+            for gp in &g.procs {
+                let e = gpu_use.entry(gp.pid).or_insert((None, 0));
+                if let Some(u) = gp.usage {
+                    e.0 = Some(e.0.unwrap_or(0.0) + u);
+                }
+                e.1 += gp.vram;
+            }
+        }
 
         // procesos
         let mem_total = self.sys.total_memory();
@@ -476,6 +539,10 @@ impl Monitor {
                     cmd: p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" "),
                     disk_read: rate(du.read_bytes),
                     disk_write: rate(du.written_bytes),
+                    parent: p.parent().map(|x| x.as_u32()),
+                    start_time: p.start_time(),
+                    gpu: gpu_use.get(&p.pid().as_u32()).and_then(|g| g.0),
+                    vram: gpu_use.get(&p.pid().as_u32()).map(|g| g.1).unwrap_or(0),
                 }
             })
             .collect();
@@ -589,6 +656,10 @@ impl Monitor {
                 SortBy::Pid => a.pid.cmp(&b.pid),
                 SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 SortBy::Disk => (b.disk_read + b.disk_write).total_cmp(&(a.disk_read + a.disk_write)),
+                SortBy::User => a.user.cmp(&b.user),
+                SortBy::Gpu => b.gpu.unwrap_or(-1.0).total_cmp(&a.gpu.unwrap_or(-1.0)),
+                SortBy::Vram => b.vram.cmp(&a.vram),
+                SortBy::State => a.state.letter().cmp(b.state.letter()),
             };
             if reverse { o.reverse() } else { o }
         });
