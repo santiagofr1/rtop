@@ -501,3 +501,55 @@ pub fn chart(ui: &mut Ui, th: &Theme, o: &ChartOpts, up: &[Series], down: Option
         }
     }
 }
+
+// ---------- anchos de columna ----------
+
+/// Anchos de las columnas de las tablas de procesos, compartidos entre Inicio
+/// y las páginas para que la misma columna mida lo mismo en todos lados.
+pub mod w {
+    pub const PID: f32 = 64.0;
+    pub const NAME: f32 = 160.0;
+    pub const USER: f32 = 96.0;
+    /// número + medidor
+    pub const METER: f32 = 116.0;
+    pub const MEM: f32 = 124.0;
+    pub const GPU: f32 = 70.0;
+    pub const VRAM: f32 = 80.0;
+    pub const RATE: f32 = 90.0;
+    pub const STATE: f32 = 120.0;
+    pub const TIME: f32 = 104.0;
+    /// números chicos: %, cantidades
+    pub const SMALL: f32 = 90.0;
+}
+
+// ---------- visuales de egui ----------
+
+/// Colores y tamaños de los widgets de egui según el tema.
+pub fn apply_visuals(ctx: &egui::Context, th: &Theme) {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = c(th.bg);
+    v.window_fill = c(th.panel);
+    v.extreme_bg_color = c(th.bg);
+    v.faint_bg_color = blend(th.panel, th.sel);
+    v.override_text_color = Some(c(th.text));
+    v.selection.bg_fill = c(th.sel);
+    v.selection.stroke = Stroke::new(1.0, c(th.accent));
+    v.hyperlink_color = c(th.accent);
+    v.text_cursor.stroke = Stroke::new(2.0, c(th.accent));
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c(th.sel));
+    v.widgets.inactive.bg_fill = c(th.sel);
+    v.widgets.inactive.weak_bg_fill = c(th.sel);
+    v.widgets.hovered.bg_fill = blend(th.sel, th.dim);
+    v.widgets.hovered.weak_bg_fill = blend(th.sel, th.dim);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, c(th.accent).gamma_multiply(0.6));
+    v.widgets.active.bg_fill = c(th.accent);
+    v.widgets.active.weak_bg_fill = c(th.accent);
+    ctx.set_visuals(v);
+    ctx.global_style_mut(|s| {
+        s.text_styles.insert(egui::TextStyle::Body, FontId::proportional(T_BODY));
+        s.text_styles.insert(egui::TextStyle::Button, FontId::proportional(13.5));
+        s.text_styles.insert(egui::TextStyle::Small, FontId::proportional(T_META));
+        s.spacing.button_padding = Vec2::new(10.0, 5.0);
+        s.spacing.interact_size.y = 28.0;
+    });
+}

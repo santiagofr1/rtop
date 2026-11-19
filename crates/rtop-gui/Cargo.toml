@@ -8,3 +8,7 @@ eframe = { version = "0.35.0", features = ["glow"] }
 egui_extras = "0.35.0"
 egui_plot = "0.36.0"
 rtop-core = { version = "0.2.0", path = "../rtop-core" }
+
+[features]
+# ganchos para probar la UI: RTOP_SHOT, RTOP_CLICKS, RTOP_PAGE... (ver devtools.rs)
+devtools = []
