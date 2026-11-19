@@ -7,6 +7,7 @@ use rtop_core::{fmt::human, pct, Proc, SortBy, Vendor};
 
 use crate::{
     kit::{
+        self,
         body, c, chart, columns, kv, legend, meta, meter, muted, num, section, stat_row, strong, surface, tail_f32, tail_f64, ChartOpts,
         Grad, Series, Stat,
     },
@@ -29,75 +30,156 @@ pub fn mhz_fmt(v: f64) -> String {
     if v >= 1000.0 { format!("{:.2} GHz", v / 1000.0) } else { format!("{v:.0} MHz") }
 }
 
-/// Columnas extra de las tablas compactas de procesos.
+/// Columnas extra de las tablas de procesos de las páginas.
 pub enum Col {
+    /// número alineado a la derecha
     Text(String, Color32),
+    /// número con medidor
     Meter(f32, Grad, String),
+    /// texto libre, a la izquierda y apagado
+    Note(String),
 }
 
 impl App {
     pub(crate) fn opts(&self, height: f32, max: Option<f32>, fmt: fn(f64) -> String) -> ChartOpts {
-        ChartOpts { height, max, fmt, window: crate::WINDOW, step: self.cfg.refresh_ms() as f32 / 1000.0, fill: true }
+        ChartOpts { height, max, fmt, window: crate::WINDOW, step: self.cfg.refresh_ms() as f32 / 1000.0, fill: true, floor: 0.0, zero: true, binary: false }
     }
 
-    /// Tabla compacta de procesos (click = verlo en Inicio, click derecho = terminar).
-    pub(crate) fn proc_table(&self, ui: &mut Ui, id: &str, heads: &[&str], rows: Vec<(u32, String, Vec<Col>)>) {
+    /// Tabla de procesos de las páginas, con el mismo formato que la de Inicio:
+    /// PID, nombre con sus argumentos, usuario y las columnas propias de cada
+    /// página (`heads`: título y ancho). Click = verlo en Inicio, click
+    /// derecho = terminar.
+    pub(crate) fn proc_table(&self, ui: &mut Ui, id: &str, heads: &[(&str, f32)], rows: Vec<(u32, String, Vec<Col>)>) {
         let th = &self.th;
+        let mut_c = muted(th);
         if rows.is_empty() {
             ui.label(meta(th, "Ninguno por ahora."));
             return;
         }
-        egui::Grid::new(id).num_columns(heads.len() + 1).spacing([22.0, 7.0]).show(ui, |ui| {
-            ui.label(meta(th, "Proceso"));
-            for h in heads {
-                ui.label(meta(th, *h));
+        // los títulos se alinean como su contenido
+        let left: Vec<bool> = rows[0].2.iter().map(|c| matches!(c, Col::Note(_))).collect();
+        // si no entra, primero se va el usuario y después el PID
+        let extra: f32 = heads.iter().map(|h| h.1 + 10.0).sum();
+        let avail = ui.available_width();
+        let show_user = avail - extra > 160.0 + 64.0 + 96.0 + 30.0;
+        let show_pid = avail - extra > 160.0 + 64.0 + 20.0;
+        let mut tb = egui_extras::TableBuilder::new(ui)
+            .id_salt(id)
+            .striped(false)
+            .vscroll(false)
+            .sense(Sense::click())
+            .cell_layout(Layout::left_to_right(Align::Center));
+        if show_pid {
+            tb = tb.column(egui_extras::Column::exact(56.0));
+        }
+        tb = tb.column(egui_extras::Column::remainder().at_least(150.0).clip(true));
+        if show_user {
+            tb = tb.column(egui_extras::Column::exact(90.0).clip(true));
+        }
+        for h in heads {
+            tb = tb.column(egui_extras::Column::exact(h.1).clip(true));
+        }
+        let head = |ui: &mut Ui, t: &str, right: bool| {
+            let l = if right { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) };
+            ui.with_layout(l, |ui| ui.label(meta(th, t)));
+        };
+        let right = |ui: &mut Ui, t: egui::RichText| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(t));
+        };
+        tb.header(24.0, |mut h| {
+            if show_pid {
+                h.col(|ui| head(ui, "PID", true));
             }
-            ui.end_row();
+            h.col(|ui| head(ui, "Proceso", false));
+            if show_user {
+                h.col(|ui| head(ui, "Usuario", false));
+            }
+            for (k, (t, _)) in heads.iter().enumerate() {
+                h.col(|ui| head(ui, t, !left.get(k).copied().unwrap_or(false)));
+            }
+        })
+        .body(|mut tbody| {
             for (pid, name, cols) in rows {
-                let r = ui
-                    .add(egui::Label::new(body(th, &name)).sense(Sense::click()))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(format!("PID {pid}. Click para verlo en Inicio"));
-                if r.clicked() {
-                    self.goto.set(Some(crate::Page::Home));
-                    self.select_req.set(Some(pid));
-                }
-                r.context_menu(|ui| {
-                    if ui.button("Terminar proceso…").clicked() {
-                        *self.kill_req.borrow_mut() = Some((pid, name.clone()));
-                        ui.close();
+                let proc = self.mon.proc(pid);
+                tbody.row(26.0, |mut row| {
+                    if show_pid {
+                        row.col(|ui| right(ui, num(pid.to_string(), mut_c)));
                     }
+                    row.col(|ui| {
+                        ui.label(body(th, &name));
+                        let args = proc.and_then(|p| p.cmd.split_once(' ')).map(|(_, a)| a.trim()).unwrap_or("");
+                        if !args.is_empty() {
+                            ui.add(egui::Label::new(egui::RichText::new(args).size(12.5).color(mut_c)).truncate());
+                        }
+                    });
+                    if show_user {
+                        row.col(|ui| {
+                            let u = proc.map(|p| p.user.as_str()).unwrap_or("");
+                            ui.label(egui::RichText::new(u).size(13.0).color(if u == "root" { c(th.warn) } else { mut_c }));
+                        });
+                    }
+                    for col in cols {
+                        row.col(|ui| match col {
+                            Col::Text(t, color) => right(ui, num(t, color)),
+                            Col::Note(t) => {
+                                ui.add(egui::Label::new(egui::RichText::new(t).size(13.0).color(mut_c)).truncate());
+                            }
+                            Col::Meter(v, g, t) => {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(num(t, if v < 0.05 { mut_c } else { c(th.text) }));
+                                    let (r, _) = ui.allocate_exact_size(Vec2::new(36.0, 6.0), Sense::hover());
+                                    if v >= 0.5 {
+                                        crate::kit::paint_meter(ui.painter(), th, r, v.min(100.0), g);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    let r = row.response().on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Click para verlo en Inicio");
+                    if r.clicked() {
+                        self.goto.set(Some(crate::Page::Home));
+                        self.select_req.set(Some(pid));
+                    }
+                    r.context_menu(|ui| {
+                        if ui.button("Ver en Inicio").clicked() {
+                            self.goto.set(Some(crate::Page::Home));
+                            self.select_req.set(Some(pid));
+                            ui.close();
+                        }
+                        if ui.button("Terminar proceso…").clicked() {
+                            *self.kill_req.borrow_mut() = Some((pid, name.clone()));
+                            ui.close();
+                        }
+                    });
                 });
-                for col in cols {
-                    match col {
-                        Col::Text(t, color) => {
-                            ui.label(num(t, color));
-                        }
-                        Col::Meter(v, g, t) => {
-                            ui.horizontal(|ui| {
-                                meter(ui, th, 64.0, v, g);
-                                ui.label(num(t, c(th.text)));
-                            });
-                        }
-                    }
-                }
-                ui.end_row();
             }
         });
     }
 
+    /// Columnas comunes a todas las tablas: CPU, memoria y tiempo activo.
+    fn base_cols(&self, p: &Proc) -> (Col, Col, Col) {
+        let th = &self.th;
+        let v = self.cpu_of(p);
+        let scale = if self.cfg.cpu_per_core { 1.0 } else { 4.0 };
+        (
+            Col::Meter((v * scale).min(100.0), Grad::Heat, format!("{v:.1}%")),
+            Col::Meter(p.mem_pct * 4.0, Grad::Mono(th.mem), human(p.mem)),
+            Col::Text(rtop_core::fmt::hms(p.time), muted(th)),
+        )
+    }
+
     fn cpu_rows(&self, procs: &[&Proc]) -> Vec<(u32, String, Vec<Col>)> {
         let th = &self.th;
-        let scale = if self.cfg.cpu_per_core { 1.0 } else { 4.0 };
         procs
             .iter()
             .map(|p| {
-                let v = self.cpu_of(p);
-                (
-                    p.pid,
-                    p.name.clone(),
-                    vec![Col::Meter((v * scale).min(100.0), Grad::Heat, format!("{v:>5.1}%")), Col::Text(human(p.mem), muted(th))],
-                )
+                let (cpu, mem, time) = self.base_cols(p);
+                let gpu = match p.gpu {
+                    Some(g) if g >= 0.05 => Col::Text(format!("{g:.1}%"), Grad::Heat.at(th, g / 100.0)),
+                    _ => Col::Text(String::new(), muted(th)),
+                };
+                let state = Col::Note(crate::home::state_name(p.state).to_string());
+                (p.pid, p.name.clone(), vec![cpu, mem, gpu, state, time])
             })
             .collect()
     }
@@ -107,11 +189,9 @@ impl App {
         procs
             .iter()
             .map(|p| {
-                (
-                    p.pid,
-                    p.name.clone(),
-                    vec![Col::Meter(p.mem_pct * 4.0, Grad::Mono(th.mem), human(p.mem)), Col::Text(format!("{:.1}%", p.mem_pct), muted(th))],
-                )
+                let (cpu, mem, time) = self.base_cols(p);
+                let vram = Col::Text(if p.vram > 0 { human(p.vram) } else { String::new() }, c(th.mem));
+                (p.pid, p.name.clone(), vec![mem, Col::Text(format!("{:.1}%", p.mem_pct), muted(th)), vram, cpu, time])
             })
             .collect()
     }
@@ -182,7 +262,12 @@ impl App {
         surface(ui, th, |ui| {
             section(ui, th, "Los que más CPU usan", Some(meta(th, self.cpu_hint())));
             let top = m.top(SortBy::Cpu, 10);
-            self.proc_table(ui, "cpu_top", &["CPU", "Memoria"], self.cpu_rows(&top));
+            self.proc_table(
+                ui,
+                "cpu_top",
+                &[("CPU", 116.0), ("Memoria", 124.0), ("GPU", 70.0), ("Estado", 120.0), ("Tiempo activo", 104.0)],
+                self.cpu_rows(&top),
+            );
         });
     }
 
@@ -298,31 +383,34 @@ impl App {
             );
         });
 
-        columns(ui, 2, 2, 12.0, |ui, i| {
-            surface(ui, th, |ui| {
-                if i == 0 {
-                    section(ui, th, "Detalle", None);
-                    kv(
-                        ui,
-                        th,
-                        "mem_kv",
-                        &[
-                            ("Total instalada", human(mi.total)),
-                            ("En uso", format!("{} ({used_pct:.0}%)", human(mi.used()))),
-                            ("Disponible", human(mi.available)),
-                            ("Caché de archivos", human(mi.cached)),
-                            ("Buffers", human(mi.buffers)),
-                            ("Compartida entre procesos", human(mi.shmem)),
-                            ("Pendiente de escribir a disco", human(mi.dirty)),
-                            ("Swap", format!("{} de {}", human(s.swap_used), human(s.swap_total))),
-                        ],
-                    );
-                } else {
-                    section(ui, th, "Los que más memoria usan", None);
-                    let top = m.top(SortBy::Mem, 10);
-                    self.proc_table(ui, "mem_top", &["Memoria", "% del total"], self.mem_rows(&top));
-                }
-            });
+        surface(ui, th, |ui| {
+            section(ui, th, "Los que más memoria usan", None);
+            let top = m.top(SortBy::Mem, 12);
+            self.proc_table(
+                ui,
+                "mem_top",
+                &[("Memoria", 124.0), ("% del total", 90.0), ("VRAM", 80.0), ("CPU", 116.0), ("Tiempo activo", 104.0)],
+                self.mem_rows(&top),
+            );
+        });
+
+        surface(ui, th, |ui| {
+            section(ui, th, "Detalle", None);
+            kv(
+                ui,
+                th,
+                "mem_kv",
+                &[
+                    ("Total instalada", human(mi.total)),
+                    ("En uso", format!("{} ({used_pct:.0}%)", human(mi.used()))),
+                    ("Disponible", human(mi.available)),
+                    ("Caché de archivos", human(mi.cached)),
+                    ("Buffers", human(mi.buffers)),
+                    ("Compartida entre procesos", human(mi.shmem)),
+                    ("Pendiente de escribir a disco", human(mi.dirty)),
+                    ("Swap", format!("{} de {}", human(s.swap_used), human(s.swap_total))),
+                ],
+            );
         });
     }
 
@@ -378,17 +466,20 @@ impl App {
 
         let series = |q: Option<&rtop_core::Hist<f32>>| q.map(|q| tail_f32(q, crate::WINDOW)).unwrap_or_default();
         surface(ui, th, |ui| {
-            section(ui, th, "Uso y VRAM", None);
-            let mut o = self.opts(160.0, Some(100.0), pct_fmt);
-            o.fill = false;
-            chart(
+            section(ui, th, "Uso", Some(strong(format!("{busy:.0}%"), heat(busy), 15.0)));
+            chart(ui, th, &self.opts(150.0, Some(100.0), pct_fmt), &[Series::new("uso", series(h.map(|h| &h.busy)), Grad::Heat)], None);
+        });
+        surface(ui, th, |ui| {
+            section(
                 ui,
                 th,
-                &o,
-                &[Series::new("VRAM", series(h.map(|h| &h.vram)), Grad::Mono(th.mem)), Series::new("uso", series(h.map(|h| &h.busy)), Grad::Heat)],
-                None,
+                "VRAM",
+                Some(strong(format!("{} de {}", human(g.vram_used), human(g.vram_total)), c(th.mem), 15.0)),
             );
-            legend(ui, th, &[("uso".into(), c(th.ok)), ("VRAM".into(), c(th.mem))]);
+            // en % del total, así la escala no salta
+            let mut o = self.opts(110.0, Some(100.0), pct_fmt);
+            o.floor = 100.0;
+            chart(ui, th, &o, &[Series::new("VRAM", series(h.map(|h| &h.vram)), Grad::Mono(th.mem))], None);
         });
 
         columns(ui, 2, 2, 12.0, |ui, i| {
@@ -410,44 +501,51 @@ impl App {
             });
         });
 
-        columns(ui, 2, 2, 12.0, |ui, i| {
-            surface(ui, th, |ui| {
-                if i == 0 {
-                    section(ui, th, "Quién la está usando", Some(meta(th, match g.procs.len() { 1 => "1 proceso".to_string(), n => format!("{n} procesos") })));
-                    let rows = g
-                        .procs
-                        .iter()
-                        .take(12)
-                        .map(|p| {
-                            let u = p.usage.unwrap_or(0.0);
-                            (
-                                p.pid,
-                                p.name.clone(),
-                                vec![
-                                    Col::Meter(u, Grad::Heat, p.usage.map(|u| format!("{u:>5.1}%")).unwrap_or("sin dato".into())),
-                                    Col::Text(human(p.vram), c(th.mem)),
-                                ],
-                            )
-                        })
-                        .collect();
-                    self.proc_table(ui, "gpu_procs", &["Uso", "VRAM"], rows);
-                } else {
-                    section(ui, th, "Detalle", None);
-                    let opt = |v: Option<f32>, f: fn(f64) -> String| v.map(|x| f(x as f64)).unwrap_or("sin dato".into());
-                    let mut rows = vec![
-                        ("Fabricante", g.vendor.label().to_string()),
-                        ("Reloj del núcleo", opt(g.clock_mhz, mhz_fmt)),
-                        ("Reloj de la memoria", opt(g.mem_clock_mhz, mhz_fmt)),
-                        ("Ventilador", g.fan_pct.map(|f| format!("{f:.0}%")).unwrap_or("sin dato (lo maneja la laptop)".into())),
-                        ("Potencia", match g.power_limit_w { Some(l) => format!("{} de {}", opt(g.power_w, watt_fmt), watt_fmt(l as f64)), None => opt(g.power_w, watt_fmt) }),
-                        ("VRAM", format!("{} de {}", human(g.vram_used), human(g.vram_total))),
+        surface(ui, th, |ui| {
+            section(ui, th, "Procesos que la usan", Some(meta(th, match g.procs.len() { 1 => "1 proceso".to_string(), n => format!("{n} procesos") })));
+            let rows = g
+                .procs
+                .iter()
+                .take(12)
+                .map(|gp| {
+                    let u = gp.usage.unwrap_or(0.0);
+                    let mut cols = vec![
+                        Col::Meter(u, Grad::Heat, gp.usage.map(|u| format!("{u:.1}%")).unwrap_or("sin dato".into())),
+                        Col::Text(human(gp.vram), c(th.mem)),
                     ];
-                    if g.shared_total > 0 {
-                        rows.push(("Memoria compartida", format!("{} de {} (toma RAM)", human(g.shared_used), human(g.shared_total))));
+                    match self.mon.proc(gp.pid) {
+                        Some(p) => {
+                            let (cpu, mem, time) = self.base_cols(p);
+                            cols.extend([cpu, mem, time]);
+                        }
+                        None => cols.extend((0..3).map(|_| Col::Text(String::new(), muted(th)))),
                     }
-                    kv(ui, th, "gpu_kv", &rows);
-                }
-            });
+                    (gp.pid, gp.name.clone(), cols)
+                })
+                .collect();
+            self.proc_table(
+                ui,
+                "gpu_procs",
+                &[("Uso de GPU", 116.0), ("VRAM", 80.0), ("CPU", 116.0), ("Memoria", 124.0), ("Tiempo activo", 104.0)],
+                rows,
+            );
+        });
+
+        surface(ui, th, |ui| {
+            section(ui, th, "Detalle", None);
+            let opt = |v: Option<f32>, f: fn(f64) -> String| v.map(|x| f(x as f64)).unwrap_or("sin dato".into());
+            let mut rows = vec![
+                ("Fabricante", g.vendor.label().to_string()),
+                ("Reloj del núcleo", opt(g.clock_mhz, mhz_fmt)),
+                ("Reloj de la memoria", opt(g.mem_clock_mhz, mhz_fmt)),
+                ("Ventilador", g.fan_pct.map(|f| format!("{f:.0}%")).unwrap_or("sin dato (lo maneja la laptop)".into())),
+                ("Potencia", match g.power_limit_w { Some(l) => format!("{} de {}", opt(g.power_w, watt_fmt), watt_fmt(l as f64)), None => opt(g.power_w, watt_fmt) }),
+                ("VRAM", format!("{} de {}", human(g.vram_used), human(g.vram_total))),
+            ];
+            if g.shared_total > 0 {
+                rows.push(("Memoria compartida", format!("{} de {} (toma RAM)", human(g.shared_used), human(g.shared_total))));
+            }
+            kv(ui, th, "gpu_kv", &rows);
         });
     }
 
@@ -472,12 +570,18 @@ impl App {
             ],
         );
 
+        let rate = |h: f32| {
+            let mut o = self.opts(h, None, rate_fmt);
+            o.floor = 4096.0;
+            o.binary = true;
+            o
+        };
         surface(ui, th, |ui| {
             section(ui, th, "Tráfico", None);
             chart(
                 ui,
                 th,
-                &self.opts(190.0, None, rate_fmt),
+                &rate(190.0),
                 &[Series::new("bajada", tail_f64(&m.rx_hist, crate::WINDOW), Grad::Mono(th.ok))],
                 Some(&Series::new("subida", tail_f64(&m.tx_hist, crate::WINDOW), Grad::Mono(th.warn))),
             );
@@ -488,44 +592,67 @@ impl App {
             section(ui, th, "Interfaces", None);
             for (i, n) in real.iter().enumerate() {
                 if i > 0 {
+                    ui.add_space(6.0);
                     ui.separator();
+                    ui.add_space(6.0);
                 }
+                let kind = if n.name.starts_with("wl") {
+                    "Wi-Fi"
+                } else if n.name.starts_with("en") || n.name.starts_with("eth") {
+                    "cable"
+                } else if n.name.starts_with("tailscale") {
+                    "VPN de Tailscale"
+                } else if n.name.starts_with("tun") || n.name.starts_with("wg") {
+                    "VPN"
+                } else {
+                    ""
+                };
                 ui.horizontal(|ui| {
                     ui.label(strong(&n.name, c(th.text), 15.0));
+                    ui.label(meta(th, kind));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(num(format!("subida {}", rate_fmt(n.tx_rate)), c(th.warn)));
                         ui.label(num(format!("bajada {}", rate_fmt(n.rx_rate)), c(th.ok)));
                     });
                 });
-                ui.horizontal_top(|ui| {
-                    let w = ui.available_width();
-                    ui.allocate_ui_with_layout(Vec2::new(w * 0.55, 0.0), Layout::top_down(Align::Min), |ui| {
-                        if let Some((rx, tx)) = m.net_hist.get(&n.name) {
-                            chart(
-                                ui,
-                                th,
-                                &self.opts(70.0, None, rate_fmt),
-                                &[Series::new("bajada", tail_f64(rx, crate::WINDOW), Grad::Mono(th.ok))],
-                                Some(&Series::new("subida", tail_f64(tx, crate::WINDOW), Grad::Mono(th.warn))),
-                            );
-                        }
-                    });
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        kv(
-                            ui,
-                            th,
-                            &format!("net_{}", n.name),
-                            &[
-                                ("IP", if n.ips.is_empty() { "sin IP".into() } else { n.ips.join("\n") }),
-                                ("MAC", n.mac.clone()),
-                                ("Bajado desde el arranque", human(n.total_rx)),
-                                ("Subido desde el arranque", human(n.total_tx)),
-                            ],
-                        );
-                    });
-                });
+                ui.add_space(4.0);
+                if let Some((rx, tx)) = m.net_hist.get(&n.name) {
+                    chart(
+                        ui,
+                        th,
+                        &rate(130.0),
+                        &[Series::new("bajada", tail_f64(rx, crate::WINDOW), Grad::Mono(th.ok))],
+                        Some(&Series::new("subida", tail_f64(tx, crate::WINDOW), Grad::Mono(th.warn))),
+                    );
+                }
+                ui.add_space(8.0);
+                let ips: Vec<std::net::IpAddr> = n.ips.iter().filter_map(|s| s.split('/').next()?.parse().ok()).collect();
+                let users = rtop_core::netproc::by_process(&self.conns, &ips);
+                let mut rows = vec![("IP", if n.ips.is_empty() { "sin IP".into() } else { n.ips.join("\n") })];
+                if n.mac != "00:00:00:00:00:00" && !n.mac.is_empty() {
+                    rows.push(("MAC", n.mac.clone()));
+                }
+                rows.push(("Bajado desde el arranque", human(n.total_rx)));
+                rows.push(("Subido desde el arranque", human(n.total_tx)));
+                kv(ui, th, &format!("net_{}", n.name), &rows);
+                ui.add_space(8.0);
+                ui.label(body(th, "Procesos con conexiones activas"));
+                if users.is_empty() {
+                    ui.label(meta(th, "Sin conexiones activas en esta interfaz."));
+                } else {
+                    let rows = users
+                        .iter()
+                        .take(8)
+                        .map(|(pid, name, k, dst)| (*pid, name.to_string(), vec![Col::Text(k.to_string(), c(th.text)), Col::Note(dst.join(", "))]))
+                        .collect();
+                    self.proc_table(ui, &format!("netp_{}", n.name), &[("Conexiones", 90.0), ("Destinos", 380.0)], rows);
+                }
             }
+            ui.add_space(8.0);
+            ui.label(meta(
+                th,
+                "El tráfico por proceso requiere permisos de administrador, por eso se listan las conexiones activas de cada uno. No incluye procesos del sistema (root).",
+            ));
             if !virt.is_empty() {
                 ui.separator();
                 egui::CollapsingHeader::new(meta(th, format!("Interfaces virtuales (docker, puentes): {}", virt.len())))
@@ -570,7 +697,7 @@ impl App {
             chart(
                 ui,
                 th,
-                &self.opts(170.0, None, rate_fmt),
+                &ChartOpts { floor: 64.0 * 1024.0, binary: true, ..self.opts(170.0, None, rate_fmt) },
                 &[Series::new("lectura", tail_f64(&m.disk_r_hist, crate::WINDOW), Grad::Mono(th.accent))],
                 Some(&Series::new("escritura", tail_f64(&m.disk_w_hist, crate::WINDOW), Grad::Mono(th.mem))),
             );
@@ -614,10 +741,13 @@ impl App {
                 let rows = top
                     .iter()
                     .map(|p| {
-                        (p.pid, p.name.clone(), vec![Col::Text(rate_fmt(p.disk_read), c(th.accent)), Col::Text(rate_fmt(p.disk_write), c(th.mem))])
+                        {
+                            let (cpu, mem, time) = self.base_cols(p);
+                            (p.pid, p.name.clone(), vec![Col::Text(rate_fmt(p.disk_read), c(th.accent)), Col::Text(rate_fmt(p.disk_write), c(th.mem)), cpu, mem, time])
+                        }
                     })
                     .collect();
-                self.proc_table(ui, "disk_top", &["Lectura", "Escritura"], rows);
+                self.proc_table(ui, "disk_top", &[("Lectura", 90.0), ("Escritura", 90.0), ("CPU", 116.0), ("Memoria", 124.0), ("Tiempo activo", 104.0)], rows);
             }
         });
     }
@@ -663,9 +793,9 @@ impl App {
             });
             return;
         }
-        items.sort_by(|a, b| b.value.total_cmp(&a.value));
-
-        let hottest = &items[0];
+        // orden fijo (el del sistema): si se reordenaran por valor, las
+        // tarjetas saltarían de lugar a cada rato
+        let hottest = items.iter().max_by(|a, b| a.value.total_cmp(&b.value)).unwrap();
         stat_row(
             ui,
             th,
@@ -681,41 +811,91 @@ impl App {
             ],
         );
 
-        // un color por sensor, repartiendo el círculo de tonos
-        let n = items.len();
-        let palette: Vec<Color32> = (0..n).map(|i| egui::ecolor::Hsva::new(0.02 + 0.8 * i as f32 / n.max(2) as f32, 0.55, 0.95, 1.0).into()).collect();
+        let step = self.cfg.refresh_ms() as f32 / 1000.0;
+        let span_of = |n: usize| {
+            let secs = n as f32 * step;
+            if secs < 90.0 { format!("{secs:.0} s") } else { format!("{:.0} min", secs / 60.0) }
+        };
         let rgb = |col: Color32| rtop_core::Rgb(col.r(), col.g(), col.b());
 
-        surface(ui, th, |ui| {
-            section(ui, th, "Todas juntas", None);
-            let mut o = self.opts(220.0, Some(100.0), temp_fmt);
-            o.fill = false;
-            let series: Vec<Series> =
-                items.iter().enumerate().map(|(i, t)| Series::new(t.label.clone(), t.data.clone(), Grad::Mono(rgb(palette[i])))).collect();
-            chart(ui, th, &o, &series, None);
-            legend(ui, th, &items.iter().enumerate().map(|(i, t)| (t.label.clone(), palette[i])).collect::<Vec<_>>());
-        });
-
-        surface(ui, th, |ui| {
-            section(ui, th, "Por sensor", None);
-            egui::Grid::new("temps").num_columns(5).spacing([22.0, 9.0]).show(ui, |ui| {
-                for h in ["Sensor", "Ahora", "", "Máxima vista", "Crítica"] {
-                    ui.label(meta(th, h));
-                }
-                ui.end_row();
-                for (i, t) in items.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover());
-                        ui.painter().rect_filled(r, CornerRadius::same(2), palette[i]);
-                        ui.label(body(th, &t.label));
+        // sensor ampliado: gráfico grande con tooltip y los números del período
+        let open = self.sensor_open.borrow().clone();
+        if let Some(t) = open.as_ref().and_then(|l| items.iter().find(|t| &t.label == l)) {
+            let col = Grad::Heat.at(th, t.value / 100.0);
+            let peak = t.data.iter().copied().fold(t.value, f32::max);
+            let low = t.data.iter().copied().fold(t.value, f32::min);
+            let avg = if t.data.is_empty() { t.value } else { t.data.iter().sum::<f32>() / t.data.len() as f32 };
+            surface(ui, th, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(kit::section_title(th, &t.label));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Cerrar").clicked() {
+                            *self.sensor_open.borrow_mut() = None;
+                        }
+                        ui.add_space(12.0);
+                        ui.label(strong(format!("{:.0} °C", t.value), col, 24.0));
                     });
-                    ui.label(strong(format!("{:.0} °C", t.value), Grad::Heat.at(th, t.value / 100.0), 15.0));
-                    meter(ui, th, 200.0, t.value, Grad::Heat);
-                    ui.label(num(t.max.map(|x| format!("{x:.0} °C")).unwrap_or("sin dato".into()), muted(th)));
-                    ui.label(num(t.crit.map(|x| format!("{x:.0} °C")).unwrap_or("sin dato".into()), muted(th)));
-                    ui.end_row();
+                });
+                ui.add_space(4.0);
+                let mut o = self.opts(280.0, None, temp_fmt);
+                o.zero = false;
+                chart(ui, th, &o, &[Series::new(t.label.clone(), t.data.clone(), Grad::Mono(rgb(col)))], None);
+                ui.add_space(6.0);
+                let mut cells = vec![
+                    Stat::new("Mínima", format!("{low:.0} °C"), Grad::Heat.at(th, low / 100.0)),
+                    Stat::new("Promedio", format!("{avg:.1} °C"), c(th.text)),
+                    Stat::new("Máxima", format!("{peak:.0} °C"), Grad::Heat.at(th, peak / 100.0)).detail(format!("en los últimos {}", span_of(t.data.len()))),
+                ];
+                if let Some(cr) = t.crit {
+                    cells.push(Stat::new("Crítica", format!("{cr:.0} °C"), c(th.hot)).detail(format!("faltan {:.0} °C", (cr - t.value).max(0.0))));
+                } else if let Some(mx) = t.max {
+                    cells.push(Stat::new("Alta según el sensor", format!("{mx:.0} °C"), c(th.warn)));
                 }
+                kit::stat_row(ui, th, "sensor_big", &cells);
             });
+        }
+
+        // una tarjeta por sensor, cada una con su propia escala: así se ven
+        // las subidas de pocos grados y los picos. Click = ampliar.
+        let cols = if ui.available_width() > 1100.0 { 3 } else { 2 };
+        columns(ui, items.len(), cols, 12.0, |ui, i| {
+            let t = &items[i];
+            let col = Grad::Heat.at(th, t.value / 100.0);
+            let peak = t.data.iter().copied().fold(t.value, f32::max);
+            let low = t.data.iter().copied().fold(t.value, f32::min);
+            let is_open = open.as_deref() == Some(t.label.as_str());
+            let card = ui
+                .scope(|ui| {
+                    surface(ui, th, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(strong(&t.label, c(th.text), 15.0));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(strong(format!("{:.0} °C", t.value), col, 22.0));
+                            });
+                        });
+                        ui.add_space(6.0);
+                        let mut o = self.opts(90.0, None, temp_fmt);
+                        o.zero = false;
+                        chart(ui, th, &o, &[Series::new(t.label.clone(), t.data.clone(), Grad::Mono(rgb(col)))], None);
+                        ui.add_space(6.0);
+                        let mut line = format!("entre {low:.0} y {peak:.0} °C en los últimos {}", span_of(t.data.len()));
+                        if let Some(cr) = t.crit {
+                            line.push_str(&format!(", crítica {cr:.0} °C"));
+                        } else if let Some(mx) = t.max {
+                            line.push_str(&format!(", alta {mx:.0} °C"));
+                        }
+                        ui.label(meta(th, line));
+                    })
+                })
+                .response;
+            let r = ui.interact(card.rect, egui::Id::new(("sensor_card", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if is_open || r.hovered() {
+                let stroke = if is_open { c(th.accent) } else { c(th.sel) };
+                ui.painter().rect_stroke(card.rect, CornerRadius::same(10), egui::Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
+            }
+            if r.clicked() {
+                *self.sensor_open.borrow_mut() = if is_open { None } else { Some(t.label.clone()) };
+            }
         });
     }
 }

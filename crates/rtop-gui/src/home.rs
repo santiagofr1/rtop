@@ -374,8 +374,17 @@ impl App {
                     row.col(|ui| match col.0 {
                         "pid" => right(ui, num(p.pid.to_string(), mut_c)),
                         "name" => {
-                            let label = if show_cmd && !p.cmd.is_empty() { &p.cmd } else { &p.name };
-                            ui.label(body(&th, label.clone()));
+                            if show_cmd && !p.cmd.is_empty() {
+                                ui.label(body(&th, p.cmd.clone()));
+                            } else {
+                                // nombre y, al lado y apagados, los argumentos: distinguen
+                                // los 12 "chrome" entre sí
+                                ui.label(body(&th, p.name.clone()));
+                                let args = p.cmd.split_once(' ').map(|(_, a)| a.trim()).unwrap_or("");
+                                if !args.is_empty() {
+                                    ui.add(egui::Label::new(RichText::new(args).size(12.5).color(mut_c)).truncate());
+                                }
+                            }
                         }
                         "user" => {
                             ui.label(RichText::new(&p.user).size(13.0).color(if p.user == "root" { c(th.warn) } else { mut_c }));

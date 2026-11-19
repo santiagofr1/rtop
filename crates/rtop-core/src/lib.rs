@@ -4,6 +4,7 @@ pub mod config;
 pub mod disk;
 pub mod fmt;
 pub mod gpu;
+pub mod netproc;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},

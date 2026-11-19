@@ -354,9 +354,24 @@ pub struct ChartOpts {
     pub step: f32,
     /// relleno bajo la línea (false = solo líneas, para varias series juntas)
     pub fill: bool,
+    /// escala mínima: con tráfico casi nulo el gráfico no se llena con ruido
+    pub floor: f32,
+    /// false = la escala no arranca en 0 sino cerca del mínimo de los datos
+    /// (temperaturas: así se ven las subidas de pocos grados)
+    pub zero: bool,
+    /// bytes: la escala se redondea en potencias de 1024 (64K, 128K, 1M...)
+    pub binary: bool,
 }
 
 /// Redondea hacia arriba a 1, 2, 2.5 o 5 por potencia de 10.
+fn nice_ceil_bin(v: f32) -> f32 {
+    let mut unit = 1.0;
+    while v / unit >= 1024.0 {
+        unit *= 1024.0;
+    }
+    nice_ceil(v / unit) * unit
+}
+
 fn nice_ceil(v: f32) -> f32 {
     if v <= 0.0 {
         return 1.0;
@@ -377,14 +392,29 @@ pub fn chart(ui: &mut Ui, th: &Theme, o: &ChartOpts, up: &[Series], down: Option
     let p = ui.painter_at(rect.expand(1.0));
     p.rect_filled(rect, CornerRadius::same(6), lerp(c(th.panel), c(th.bg), 0.5));
 
-    let data_max = up
-        .iter()
-        .chain(down)
-        .flat_map(|s| s.data.iter().copied())
-        .fold(0.0f32, f32::max);
-    let scale = match o.max {
-        Some(cap) => nice_ceil((data_max * 1.2).max(cap * 0.1)).min(cap),
-        None => nice_ceil((data_max * 1.2).max(1.0)),
+    let all = || up.iter().chain(down).flat_map(|s| s.data.iter().copied());
+    let data_max = all().fold(0.0f32, f32::max);
+    let (lo, scale) = if o.zero {
+        let nice = if o.binary { nice_ceil_bin } else { nice_ceil };
+        let s = match o.max {
+            Some(cap) => nice((data_max * 1.2).max(cap * 0.1).max(o.floor)).min(cap),
+            None => nice((data_max * 1.2).max(o.floor).max(1.0)),
+        };
+        (0.0, s)
+    } else {
+        // rango ajustado de a 5, con al menos 10 de alto
+        let data_min = all().fold(f32::MAX, f32::min);
+        let data_min = if data_min == f32::MAX { 0.0 } else { data_min };
+        let mut lo = ((data_min - 2.0) / 5.0).floor() * 5.0;
+        let mut hi = ((data_max + 2.0) / 5.0).ceil() * 5.0;
+        if hi - lo < 10.0 {
+            hi = lo + 10.0;
+        }
+        if let Some(cap) = o.max {
+            hi = hi.min(cap.max(lo + 10.0));
+        }
+        lo = lo.max(0.0);
+        (lo, hi - lo)
     };
     let mid = if down.is_some() { rect.center().y } else { rect.bottom() };
 
@@ -405,7 +435,7 @@ pub fn chart(ui: &mut Ui, th: &Theme, o: &ChartOpts, up: &[Series], down: Option
             return;
         }
         let x = |i: usize| rect.right() - (n - 1 - i) as f32 * dx;
-        let frac = |v: f32| (v / scale).clamp(0.0, 1.0);
+        let frac = |v: f32| ((v - lo) / scale).clamp(0.0, 1.0);
         let y = |v: f32| mid - dir * frac(v) * area_h;
         if o.fill {
             let mut mesh = Mesh::default();
@@ -445,7 +475,10 @@ pub fn chart(ui: &mut Ui, th: &Theme, o: &ChartOpts, up: &[Series], down: Option
     // escala: solo el máximo, en el rincón
     if o.height >= 60.0 {
         let f = FontId::proportional(11.0);
-        p.text(rect.left_top() + Vec2::new(8.0, 6.0), Align2::LEFT_TOP, (o.fmt)(scale as f64), f.clone(), muted(th));
+        p.text(rect.left_top() + Vec2::new(8.0, 6.0), Align2::LEFT_TOP, (o.fmt)((lo + scale) as f64), f.clone(), muted(th));
+        if !o.zero {
+            p.text(rect.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, (o.fmt)(lo as f64), f.clone(), muted(th));
+        }
         if down.is_some() {
             p.text(rect.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, (o.fmt)(scale as f64), f, muted(th));
         }

@@ -56,6 +56,11 @@ struct App {
     started: Instant,
     shot_requested: bool,
     clicks_done: u64,
+    /// conexiones por proceso (solo se leen con la página Red abierta)
+    conns: Vec<rtop_core::netproc::Conn>,
+    conns_at: Option<Instant>,
+    /// sensor ampliado en la página de temperaturas
+    sensor_open: RefCell<Option<String>>,
 }
 
 impl App {
@@ -98,7 +103,13 @@ impl App {
             started: Instant::now(),
             shot_requested: false,
             clicks_done: 0,
+            conns: vec![],
+            conns_at: None,
+            sensor_open: RefCell::new(None),
         };
+        if let Ok(l) = std::env::var("RTOP_SENSOR") {
+            *a.sensor_open.borrow_mut() = Some(l);
+        }
         if let Ok(pid) = std::env::var("RTOP_SELECT").unwrap_or_default().parse::<u32>() {
             a.select(Some(pid));
         }
@@ -126,6 +137,10 @@ impl App {
     fn refresh(&mut self) {
         self.mon.refresh();
         self.rebuild();
+        if self.page == Page::Net && self.conns_at.is_none_or(|t| t.elapsed().as_secs_f32() >= 2.5) {
+            self.conns = rtop_core::netproc::scan();
+            self.conns_at = Some(Instant::now());
+        }
         if let Some(pid) = self.selected {
             match self.mon.proc(pid) {
                 Some(p) => {
@@ -145,6 +160,10 @@ impl App {
     }
 
     fn go(&mut self, p: Page) {
+        if p == Page::Net && self.page != Page::Net {
+            self.conns = rtop_core::netproc::scan();
+            self.conns_at = Some(Instant::now());
+        }
         self.page = p;
     }
 

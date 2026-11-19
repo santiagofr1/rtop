@@ -179,7 +179,7 @@ pub struct Config {
     pub colors: ColorOverrides,
 }
 
-pub const DEFAULT_COLUMNS: [&str; 5] = ["name", "cpu", "mem", "gpu", "disk"];
+pub const DEFAULT_COLUMNS: [&str; 9] = ["pid", "name", "user", "cpu", "mem", "gpu", "vram", "disk", "time"];
 
 impl Default for Config {
     fn default() -> Self {
