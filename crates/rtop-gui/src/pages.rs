@@ -225,7 +225,7 @@ impl App {
 
         surface(ui, th, |ui| {
             section(ui, th, "Uso total", None);
-            chart(ui, th, &self.opts(170.0, Some(100.0), pct_fmt), &[Series::new("CPU", tail_f32(&m.cpu_hist, crate::WINDOW), Grad::Heat)], None);
+            chart(ui, th, &self.opts(170.0, Some(100.0), pct_fmt), &[Series::new("CPU", tail_f32(&m.hist.cpu, crate::WINDOW), Grad::Heat)], None);
         });
 
         surface(ui, th, |ui| {
@@ -241,7 +241,7 @@ impl App {
                         ui,
                         th,
                         &self.opts(110.0, None, mhz_fmt),
-                        &[Series::new("frecuencia", tail_f32(&m.freq_hist, crate::WINDOW), Grad::Mono(th.accent))],
+                        &[Series::new("frecuencia", tail_f32(&m.hist.freq, crate::WINDOW), Grad::Mono(th.accent))],
                         None,
                     );
                 } else {
@@ -251,7 +251,7 @@ impl App {
                         .temps
                         .iter()
                         .find(|x| Some(x.value) == s.cpu_temp)
-                        .and_then(|x| m.temp_hist.get(&x.label))
+                        .and_then(|x| m.hist.temps.get(&x.label))
                         .map(|h| tail_f32(h, crate::WINDOW))
                         .unwrap_or_default();
                     chart(ui, th, &self.opts(110.0, Some(100.0), temp_fmt), &[Series::new("temperatura", data, Grad::Heat)], None);
@@ -374,10 +374,10 @@ impl App {
                 &[
                     Series::new(
                         "en uso + caché",
-                        m.mem_hist.iter().zip(&m.cache_hist).rev().take(crate::WINDOW).rev().map(|(a, b)| (a + b).min(100.0)).collect(),
+                        m.hist.mem.iter().zip(&m.hist.cache).rev().take(crate::WINDOW).rev().map(|(a, b)| (a + b).min(100.0)).collect(),
                         Grad::Mono(th.accent),
                     ),
-                    Series::new("en uso", tail_f32(&m.mem_hist, crate::WINDOW), Grad::Mono(th.mem)),
+                    Series::new("en uso", tail_f32(&m.hist.mem, crate::WINDOW), Grad::Mono(th.mem)),
                 ],
                 None,
             );
@@ -423,7 +423,7 @@ impl App {
             ui.label(meta(th, "No se encontró esta GPU."));
             return;
         };
-        let h = self.mon.gpu_detail.get(&g.id);
+        let h = self.mon.hist.gpu_detail.get(&g.id);
         let heat = |v: f32| Grad::Heat.at(th, v / 100.0);
         let kind = if g.integrated { "integrada en el procesador" } else { "dedicada" };
         ui.label(meta(th, format!("{}, {kind}, PCI {}", g.name, g.id)));
@@ -582,8 +582,8 @@ impl App {
                 ui,
                 th,
                 &rate(190.0),
-                &[Series::new("bajada", tail_f64(&m.rx_hist, crate::WINDOW), Grad::Mono(th.ok))],
-                Some(&Series::new("subida", tail_f64(&m.tx_hist, crate::WINDOW), Grad::Mono(th.warn))),
+                &[Series::new("bajada", tail_f64(&m.hist.rx, crate::WINDOW), Grad::Mono(th.ok))],
+                Some(&Series::new("subida", tail_f64(&m.hist.tx, crate::WINDOW), Grad::Mono(th.warn))),
             );
             legend(ui, th, &[("bajada (arriba)".into(), c(th.ok)), ("subida (abajo)".into(), c(th.warn))]);
         });
@@ -616,7 +616,7 @@ impl App {
                     });
                 });
                 ui.add_space(4.0);
-                if let Some((rx, tx)) = m.net_hist.get(&n.name) {
+                if let Some((rx, tx)) = m.hist.nets.get(&n.name) {
                     chart(
                         ui,
                         th,
@@ -698,8 +698,8 @@ impl App {
                 ui,
                 th,
                 &ChartOpts { floor: 64.0 * 1024.0, binary: true, ..self.opts(170.0, None, rate_fmt) },
-                &[Series::new("lectura", tail_f64(&m.disk_r_hist, crate::WINDOW), Grad::Mono(th.accent))],
-                Some(&Series::new("escritura", tail_f64(&m.disk_w_hist, crate::WINDOW), Grad::Mono(th.mem))),
+                &[Series::new("lectura", tail_f64(&m.hist.disk_r, crate::WINDOW), Grad::Mono(th.accent))],
+                Some(&Series::new("escritura", tail_f64(&m.hist.disk_w, crate::WINDOW), Grad::Mono(th.mem))),
             );
             legend(ui, th, &[("lectura (arriba)".into(), c(th.accent)), ("escritura (abajo)".into(), c(th.mem))]);
         });
@@ -773,7 +773,7 @@ impl App {
                 value: t.value,
                 max: t.max,
                 crit: t.crit,
-                data: m.temp_hist.get(&t.label).map(|h| tail_f32(h, crate::WINDOW)).unwrap_or_default(),
+                data: m.hist.temps.get(&t.label).map(|h| tail_f32(h, crate::WINDOW)).unwrap_or_default(),
             })
             .collect();
         for g in &s.gpus {
@@ -783,7 +783,7 @@ impl App {
                     value: g.temp.unwrap_or(0.0),
                     max: None,
                     crit: None,
-                    data: m.gpu_detail.get(&g.id).map(|h| tail_f32(&h.temp, crate::WINDOW)).unwrap_or_default(),
+                    data: m.hist.gpu_detail.get(&g.id).map(|h| tail_f32(&h.temp, crate::WINDOW)).unwrap_or_default(),
                 });
             }
         }

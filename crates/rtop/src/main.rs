@@ -405,15 +405,15 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
     };
     let gpu_i = s.gpus.iter().position(|g| !g.asleep);
     let empty = std::collections::VecDeque::new();
-    let gh = gpu_i.map(|i| &m.gpu_hist[i]).unwrap_or(&empty);
-    let vh = gpu_i.map(|i| &m.vram_hist[i]).unwrap_or(&empty);
+    let gh = gpu_i.map(|i| &m.hist.gpu[i]).unwrap_or(&empty);
+    let vh = gpu_i.map(|i| &m.hist.vram[i]).unwrap_or(&empty);
     let g = gpu_i.map(|i| &s.gpus[i]);
 
     let items: [(Rect, String, Vec<u64>, Option<u64>, Rgb); 6] = [
-        (top[0], format!("CPU {:.0}%", s.cpu_total), pct(&m.cpu_hist), Some(100), th.accent),
-        (top[1], format!("Memoria {:.0}%  {}/{}", s.mem_pct(), human(s.mem_used), human(s.mem_total)), pct(&m.mem_hist), Some(100), th.mem),
-        (top[2], format!("Red v{}/s ^{}/s", human(s.rx_rate as u64), human(s.tx_rate as u64)), sum(&m.rx_hist, &m.tx_hist), None, th.ok),
-        (bot[0], format!("Disco r{}/s w{}/s", human(s.disk_read_rate as u64), human(s.disk_write_rate as u64)), sum(&m.disk_r_hist, &m.disk_w_hist), None, th.warn),
+        (top[0], format!("CPU {:.0}%", s.cpu_total), pct(&m.hist.cpu), Some(100), th.accent),
+        (top[1], format!("Memoria {:.0}%  {}/{}", s.mem_pct(), human(s.mem_used), human(s.mem_total)), pct(&m.hist.mem), Some(100), th.mem),
+        (top[2], format!("Red v{}/s ^{}/s", human(s.rx_rate as u64), human(s.tx_rate as u64)), sum(&m.hist.rx, &m.hist.tx), None, th.ok),
+        (bot[0], format!("Disco r{}/s w{}/s", human(s.disk_read_rate as u64), human(s.disk_write_rate as u64)), sum(&m.hist.disk_r, &m.hist.disk_w), None, th.warn),
         (bot[1], match g {
             Some(g) => format!("GPU {} {:.0}%", g.short_name(), g.busy.unwrap_or(0.0)),
             None => "GPU -".into(),
