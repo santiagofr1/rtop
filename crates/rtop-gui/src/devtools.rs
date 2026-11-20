@@ -1,6 +1,6 @@
 //! Ganchos para probar la interfaz sin tocarla (solo con `--features devtools`):
 //!
-//! - `RTOP_PAGE=cpu|mem|gpu0|gpu1|net|disk|sensors`: página inicial
+//! - `RTOP_PAGE=cpu|mem|gpu0|gpu1|net|disk|sensors|battery`: página inicial
 //! - `RTOP_SELECT=<pid>`: proceso elegido
 //! - `RTOP_SENSOR=<nombre>`: sensor ampliado en Temperaturas
 //! - `RTOP_SHOT=/ruta.ppm` (+ `RTOP_SHOT_DELAY` segundos): captura y cierra
@@ -42,6 +42,7 @@ pub fn setup(a: &mut App) {
         Some("net") => Page::Net,
         Some("disk") => Page::Disk,
         Some("sensors") => Page::Sensors,
+        Some("battery") => Page::Battery,
         _ => Page::Home,
     };
     a.sensors.open = env("RTOP_SENSOR");

@@ -2,7 +2,7 @@
 
 use sysinfo::ProcessStatus;
 
-use crate::{gpu::Gpu, meminfo::MemInfo};
+use crate::{battery::Power, gpu::Gpu, meminfo::MemInfo};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -182,6 +182,8 @@ pub struct Stats {
     pub disk_used: u64,
     pub disk_total: u64,
     pub gpus: Vec<Gpu>,
+    /// baterías, cargadores y perfil de energía
+    pub power: Power,
     pub tasks: usize,
     pub running: usize,
 }

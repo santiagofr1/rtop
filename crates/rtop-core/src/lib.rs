@@ -3,8 +3,9 @@
 //! - `monitor`: junta todo en una foto por intervalo (`Monitor::refresh`).
 //! - `model`: los tipos que leen las interfaces (`Stats`, `Proc`...).
 //! - `history`: las series para los gráficos.
-//! - fuentes: `gpu`, `disk`, `meminfo`, `details`, `netproc`.
+//! - fuentes: `gpu`, `disk`, `meminfo`, `details`, `netproc`, `battery`.
 
+pub mod battery;
 pub mod config;
 pub mod details;
 pub mod disk;
@@ -17,6 +18,7 @@ pub mod monitor;
 pub mod names;
 pub mod netproc;
 
+pub use battery::{Adapter, BatStatus, Battery, Power};
 pub use config::{Config, Rgb, Theme};
 pub use details::ProcDetails;
 pub use gpu::{Gpu, GpuProc, Vendor};

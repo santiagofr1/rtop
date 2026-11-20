@@ -2,6 +2,7 @@
 //! grande, y después los grupos de datos. Leen de `App` sin mutarlo; las
 //! acciones (navegar, terminar un proceso) se piden con `App::act`.
 
+mod battery;
 mod cpu;
 mod disk;
 mod gpu;
@@ -10,6 +11,7 @@ mod net;
 mod sensors;
 mod table;
 
+pub(crate) use battery::{level_color, BatState};
 pub use table::Col;
 
 use rtop_core::fmt::human;

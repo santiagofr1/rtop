@@ -27,6 +27,7 @@ pub enum Page {
     Disk,
     Net,
     Sensors,
+    Battery,
 }
 
 /// Pedidos de las páginas, que se aplican al final del frame.
@@ -88,6 +89,7 @@ pub struct App {
     pub sel: Selection,
     pub net: NetState,
     pub sensors: SensorsState,
+    pub bat: crate::pages::BatState,
     pub dialogs: Dialogs,
     pub paused: bool,
     /// última actualización de datos
@@ -109,6 +111,7 @@ impl App {
             sel: Selection::default(),
             net: NetState::default(),
             sensors: SensorsState::default(),
+            bat: Default::default(),
             dialogs: Dialogs::default(),
             paused: false,
             last: Instant::now(),
@@ -173,6 +176,7 @@ impl App {
     fn refresh(&mut self) {
         self.mon.refresh();
         self.rebuild();
+        self.track_eaters();
         if self.page == Page::Net && self.net.at.is_none_or(|t| t.elapsed().as_secs_f32() >= 2.5) {
             self.scan_conns();
         }
@@ -257,6 +261,7 @@ impl eframe::App for App {
                         Page::Net => self.page_net(ui),
                         Page::Disk => self.page_disk(ui),
                         Page::Sensors => self.page_sensors(ui),
+                        Page::Battery => self.page_battery(ui),
                         Page::Home => {}
                     }
                     ui.add_space(8.0);

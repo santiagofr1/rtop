@@ -7,6 +7,7 @@ use std::{collections::HashMap, time::Instant};
 use sysinfo::{Components, DiskKind, Disks, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind, Users};
 
 use crate::{
+    battery::Power,
     disk,
     gpu::{self, Gpu},
     history::History,
@@ -130,6 +131,7 @@ impl Monitor {
             disk_used,
             disk_total,
             gpus,
+            power: Power::read(),
             tasks: self.procs.len(),
             running: self.procs.iter().filter(|p| p.state == State::Run).count(),
         };

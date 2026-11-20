@@ -48,6 +48,9 @@ pub struct History {
     pub gpu: Vec<Hist<f32>>,
     pub vram: Vec<Hist<f32>>,
     pub gpu_detail: BTreeMap<String, GpuHist>,
+    /// W sumados y muestras mientras la batería se descarga (para el promedio)
+    pub drain_sum: f64,
+    pub drain_n: u64,
 }
 
 impl History {
@@ -88,6 +91,17 @@ impl History {
             push(&mut d.power, g.power_w.unwrap_or(0.0));
             push(&mut d.clock, g.clock_mhz.unwrap_or(0.0));
         }
+        if let Some(b) = s.power.total() {
+            if let (crate::battery::BatStatus::Discharging, Some(w)) = (b.status, b.power) {
+                self.drain_sum += w as f64;
+                self.drain_n += 1;
+            }
+        }
+    }
+
+    /// W promedio a batería desde que arrancó el programa
+    pub fn drain_avg(&self) -> Option<f32> {
+        (self.drain_n > 0).then(|| (self.drain_sum / self.drain_n as f64) as f32)
     }
 }
 

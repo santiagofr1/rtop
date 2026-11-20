@@ -9,11 +9,14 @@ use crate::{
 };
 
 impl App {
-    /// Orden de la barra lateral; también define los atajos 1..8.
+    /// Orden de la barra lateral; también define los atajos 1..9.
     pub(crate) fn pages(&self) -> Vec<Page> {
         let mut v = vec![Page::Home, Page::Cpu];
         v.extend((0..self.mon.stats.gpus.len()).map(Page::Gpu));
         v.extend([Page::Mem, Page::Disk, Page::Net, Page::Sensors]);
+        if !self.mon.stats.power.batteries.is_empty() {
+            v.push(Page::Battery);
+        }
         v
     }
 
@@ -29,6 +32,7 @@ impl App {
             Page::Disk => "Disco".into(),
             Page::Net => "Red".into(),
             Page::Sensors => "Temperaturas".into(),
+            Page::Battery => "Batería".into(),
         }
     }
 
@@ -54,6 +58,17 @@ impl App {
                     let t = s.cpu_temp.or(s.temp_max);
                     (t.map(|t| format!("{t:.0} °C")).unwrap_or_default(), t.map(heat).unwrap_or(muted(&th)))
                 }
+                Page::Battery => match s.power.total() {
+                    Some(b) => {
+                        let arrow = match b.status {
+                            rtop_core::BatStatus::Charging => "↑ ",
+                            rtop_core::BatStatus::Discharging => "↓ ",
+                            _ => "",
+                        };
+                        (format!("{arrow}{:.0}%", b.capacity), crate::pages::level_color(&th, b.capacity))
+                    }
+                    None => (String::new(), muted(&th)),
+                },
             }
         };
 

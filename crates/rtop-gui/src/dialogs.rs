@@ -37,7 +37,7 @@ impl App {
         let th = self.th.clone();
         egui::Window::new("Atajos de teclado").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
             let rows = [
-                ("1 a 8", "ir a cada sección (en el orden de la barra)"),
+                ("1 a 9", "ir a cada sección (en el orden de la barra)"),
                 ("Esc", "volver a Inicio, o cerrar el detalle del proceso"),
                 ("Alt + flecha izquierda", "volver a Inicio"),
                 ("Flechas o j / k", "moverse por la tabla de procesos"),
