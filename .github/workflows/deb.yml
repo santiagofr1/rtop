@@ -40,14 +40,17 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
-      - name: Compilar
-        run: cargo build --release --workspace
-
       - name: Versión (major.minor de Cargo.toml + número de build)
         id: ver
         run: |
           base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"/\1/p' crates/rtop/Cargo.toml | head -1)
-          echo "version=${base}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          v="${base}.${{ github.run_number }}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          # que el binario (rtop --version) diga lo mismo que el paquete
+          sed -i "0,/^version = .*/s//version = \"$v\"/" crates/*/Cargo.toml
+
+      - name: Compilar
+        run: cargo build --release --workspace
 
       - name: Armar .deb
         run: |
