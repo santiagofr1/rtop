@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=rtop
+GenericName=Monitor del sistema
+Comment=CPU, memoria, GPU, red, disco, sensores y procesos
+Exec=rtop-gui
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=rtop

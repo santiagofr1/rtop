@@ -2,8 +2,24 @@
 name = "rtop"
 version = "0.2.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/santiagofr1/rtop"
+description = "Monitor del sistema estilo htop (TUI y GUI)"
 
 [dependencies]
 crossterm = "0.28"
 ratatui = "0.29"
 rtop-core = { version = "0.2.0", path = "../rtop-core" }
+
+# Paquete .deb (cargo deb -p rtop --no-build): trae la TUI y la GUI.
+[package.metadata.deb]
+name = "rtop"
+maintainer = "santiagofr1 <santiagofr1@users.noreply.github.com>"
+extended-description = "Monitor del sistema estilo htop: TUI (rtop) y GUI (rtop-gui)."
+section = "utils"
+depends = "$auto, libgl1, libxkbcommon0"
+assets = [
+  ["target/release/rtop", "usr/bin/", "755"],
+  ["target/release/rtop-gui", "usr/bin/", "755"],
+  ["../../packaging/rtop.desktop", "usr/share/applications/", "644"],
+]

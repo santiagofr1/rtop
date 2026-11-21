@@ -1,0 +1,81 @@
+# En cada push a la rama principal: compila, arma el .deb, lo publica como
+# Release y borra los Releases viejos (se quedan los últimos KEEP).
+name: deb
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deb-release
+  cancel-in-progress: false
+
+env:
+  KEEP: 5
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deb:
+    # 22.04: glibc más vieja, así el .deb anda en más distros
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencias de sistema (egui/winit)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Compilar
+        run: cargo build --release --workspace
+
+      - name: Versión (major.minor de Cargo.toml + número de build)
+        id: ver
+        run: |
+          base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"/\1/p' crates/rtop/Cargo.toml | head -1)
+          echo "version=${base}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Armar .deb
+        run: |
+          mkdir -p dist
+          cargo deb -p rtop --no-build \
+            --deb-version "${{ steps.ver.outputs.version }}" \
+            -o dist/rtop_amd64.deb
+
+      - name: Publicar Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          gh release create "v$V" dist/rtop_amd64.deb \
+            --target "$GITHUB_SHA" --latest \
+            --title "rtop $V" \
+            --notes "Build automático de ${GITHUB_SHA::7}.
+
+          \`\`\`
+          sudo apt install ./rtop_amd64.deb
+          \`\`\`"
+
+      - name: Borrar Releases viejos
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 200 --json tagName,createdAt \
+            --jq "sort_by(.createdAt) | reverse | .[${KEEP}:] | .[].tagName" |
+          while read -r tag; do
+            gh release delete "$tag" --yes --cleanup-tag
+          done
