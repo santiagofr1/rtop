@@ -23,7 +23,7 @@ jobs:
     # 22.04: glibc más vieja, así el .deb anda en más distros
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Dependencias de sistema (egui/winit)
         run: |
@@ -79,3 +79,11 @@ jobs:
           while read -r tag; do
             gh release delete "$tag" --yes --cleanup-tag
           done
+
+      - name: Avisar al repo apt (santiagofr1/apt)
+        # sin el secret no pasa nada: el repo apt igual lo levanta en menos de una hora
+        env:
+          TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+        run: |
+          [ -n "$TOKEN" ] || { echo "sin APT_DISPATCH_TOKEN, lo levanta el cron"; exit 0; }
+          GH_TOKEN="$TOKEN" gh api repos/santiagofr1/apt/dispatches -f event_type=publish

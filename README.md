@@ -25,7 +25,21 @@ rtop te muestra qué está haciendo tu máquina: CPU por núcleo, memoria, GPUs 
 
 ## Instalación
 
-### Debian / Ubuntu y derivadas (.deb)
+### Debian / Ubuntu y derivadas: repo apt (recomendado)
+
+Agregás el repo una vez y después rtop se actualiza con el resto del sistema:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://santiagofr1.github.io/apt/key.asc | sudo gpg --dearmor -o /etc/apt/keyrings/santiagofr1.gpg
+echo "deb [signed-by=/etc/apt/keyrings/santiagofr1.gpg] https://santiagofr1.github.io/apt stable main" | sudo tee /etc/apt/sources.list.d/santiagofr1.list
+sudo apt update
+sudo apt install rtop
+```
+
+Para actualizar: `sudo apt update && sudo apt upgrade`. El repo está firmado con GPG; el código que lo arma está en [santiagofr1/apt](https://github.com/santiagofr1/apt).
+
+### Debian / Ubuntu: .deb suelto
 
 Cada push a `master` compila y publica un `.deb` nuevo en [Releases](https://github.com/santiagofr1/rtop/releases):
 
