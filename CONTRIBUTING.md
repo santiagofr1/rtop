@@ -1,32 +1,35 @@
-# Cómo contribuir a rtop
+# Contributing to rtop
 
-¡Gracias por meter mano! Cualquier aporte suma: código, issues, ideas, docs o temas de colores.
+Thanks for diving in! Every contribution helps: code, issues, ideas, docs, or color themes.
 
-## Arrancar
+## Getting started
 
 ```sh
-git clone https://github.com/<tu-usuario>/rtop   # tu fork
+git clone https://github.com/<your-user>/rtop   # your fork
 cd rtop
 cargo run -p rtop          # TUI
 cargo run -p rtop-gui      # GUI
 cargo test --workspace
 ```
 
-## Antes de mandar un PR
+## Before sending a PR
 
-- `cargo test --workspace` tiene que pasar.
-- `cargo clippy --workspace` sin advertencias nuevas.
-- Un PR por tema. Si es un cambio grande, conviene abrir un issue antes para charlarlo.
-- Si tocás algo que lee del sistema (`rtop-core`), sumá un test con una muestra del archivo real (`/proc/...`, `/sys/...`). Así se puede probar sin tu hardware.
+- `cargo test --workspace` must pass.
+- `cargo clippy --workspace` with no new warnings.
+- One PR per topic. For a big change, open an issue first to discuss it.
+- If you touch anything that reads from the system (`rtop-core`), add a test with a sample of the real file
+  (`/proc/...`, `/sys/...`). That way it can be tested without your hardware.
 
-## Dónde está cada cosa
+## Where things live
 
-- `crates/rtop-core`: recolección y parseo de datos. Sin UI.
+- `crates/rtop-core`: data collection and parsing. No UI.
 - `crates/rtop`: TUI (ratatui).
-- `crates/rtop-gui`: GUI (egui). `cargo run -p rtop-gui --features devtools` habilita ganchos para probar la UI (ver `devtools.rs`).
+- `crates/rtop-gui`: GUI (egui). `cargo run -p rtop-gui --features devtools` enables hooks for testing the UI
+  (see `devtools.rs`).
 
-## Reportar un bug
+## Reporting a bug
 
-Contá tu distro, tu hardware (GPU, notebook o PC) y qué esperabas ver. Si es un problema de lectura de datos, pegá el contenido del archivo de `/proc` o `/sys` involucrado.
+Tell us your distro, your hardware (GPU, laptop or desktop), and what you expected to see. If it's a problem
+reading data, paste the contents of the relevant `/proc` or `/sys` file.
 
-Al contribuir aceptás que tu aporte se publique bajo la licencia [MIT](LICENSE) del proyecto.
+By contributing, you agree that your contribution is published under the project's [MIT](LICENSE) license.

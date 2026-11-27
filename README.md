@@ -1,33 +1,45 @@
 # rtop
 
-**Un monitor del sistema para Linux, escrito en Rust. En la terminal o en una ventana, como prefieras.**
+**A system monitor for Linux, written in Rust. In the terminal or in a window, your choice.**
 
 [![deb](https://github.com/santiagofr1/rtop/actions/workflows/deb.yml/badge.svg)](https://github.com/santiagofr1/rtop/actions/workflows/deb.yml)
-[![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
-[![PRs bienvenidos](https://img.shields.io/badge/PRs-bienvenidos-brightgreen.svg)](CONTRIBUTING.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-rtop te muestra qué está haciendo tu máquina: CPU por núcleo, memoria, GPUs (NVIDIA, AMD e Intel), red con conexiones por proceso, discos, temperaturas, batería y la lista de procesos, con historial y gráficos. Viene en dos sabores que comparten el mismo motor:
+rtop shows you what your machine is doing: per-core CPU, memory, GPUs (NVIDIA, AMD, and Intel), network with
+per-process connections, disks, temperatures, battery, and the process list, with history and graphs. It comes in
+two flavors that share the same engine:
 
-- **`rtop`**: la TUI, para la terminal o por SSH. Rápida, con teclas estilo htop/vim y temas.
-- **`rtop-gui`**: una app de escritorio hecha con egui, con páginas de detalle y gráficos.
+- **`rtop`**: the TUI, for the terminal or over SSH. Fast, with htop/vim-style keys and themes.
+- **`rtop-gui`**: a desktop app built with egui, with detail pages and graphs.
 
-## Qué tiene
+![rtop TUI](docs/screenshots/tui.png)
 
-- **CPU**: uso total y por núcleo, frecuencias e historial.
-- **Memoria**: RAM y swap con desglose (caché, buffers, etc.).
-- **GPU**: uso, VRAM y temperatura. NVIDIA vía `nvidia-smi`, AMD e Intel vía DRM.
-- **Red**: tráfico por interfaz y qué conexiones abrió cada proceso.
-- **Disco**: espacio, lectura y escritura.
-- **Sensores**: todas las temperaturas que expone el sistema, sensor por sensor.
-- **Batería**: estado, consumo actual y una estimación de cuánto consume cada proceso.
-- **Procesos**: tabla ordenable con filtro y detalle. También podés matarlos (SIGTERM o SIGKILL).
-- **Temas**: `default`, `nord`, `gruvbox`, `dracula`, `tokyo` y `mono`, más colores propios.
+![rtop GUI home](docs/screenshots/gui-home.png)
 
-## Instalación
+| CPU | Temperatures |
+|---|---|
+| ![CPU page](docs/screenshots/gui-cpu.png) | ![Temperatures page](docs/screenshots/gui-sensors.png) |
 
-### Debian / Ubuntu y derivadas: repo apt (recomendado)
+> The interface is currently in Spanish. An English translation is on the roadmap (see [Contributing](#contributing)).
 
-Agregás el repo una vez y después rtop se actualiza con el resto del sistema:
+## Features
+
+- **CPU**: total and per-core usage, frequencies, and history.
+- **Memory**: RAM and swap with a breakdown (cache, buffers, etc.).
+- **GPU**: usage, VRAM, and temperature. NVIDIA via `nvidia-smi`, AMD and Intel via DRM.
+- **Network**: traffic per interface and the connections each process has open.
+- **Disk**: space, reads, and writes.
+- **Sensors**: every temperature the system exposes, sensor by sensor.
+- **Battery**: status, current power draw, and an estimate of how much each process consumes.
+- **Processes**: sortable table with filtering and details. You can also kill them (SIGTERM or SIGKILL).
+- **Themes**: `default`, `nord`, `gruvbox`, `dracula`, `tokyo`, and `mono`, plus custom colors.
+
+## Installation
+
+### Debian / Ubuntu and derivatives: apt repository (recommended)
+
+Add the repository once, and rtop updates along with the rest of the system:
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -37,22 +49,23 @@ sudo apt update
 sudo apt install rtop
 ```
 
-Para actualizar: `sudo apt update && sudo apt upgrade`. El repo está firmado con GPG; el código que lo arma está en [santiagofr1/apt](https://github.com/santiagofr1/apt).
+To update: `sudo apt update && sudo apt upgrade`. The repository is GPG-signed; the code that builds it lives in
+[santiagofr1/apt](https://github.com/santiagofr1/apt).
 
-### Debian / Ubuntu: .deb suelto
+### Debian / Ubuntu: standalone .deb
 
-Cada push a `master` compila y publica un `.deb` nuevo en [Releases](https://github.com/santiagofr1/rtop/releases):
+Every push to `master` builds and publishes a new `.deb` in [Releases](https://github.com/santiagofr1/rtop/releases):
 
 ```sh
 wget https://github.com/santiagofr1/rtop/releases/latest/download/rtop_amd64.deb
 sudo apt install ./rtop_amd64.deb
 ```
 
-Trae los dos binarios y un acceso directo a la GUI en el menú de aplicaciones.
+It ships both binaries and a GUI shortcut in the applications menu.
 
-### Desde el código
+### From source
 
-Necesitás [Rust](https://rustup.rs) estable:
+You need stable [Rust](https://rustup.rs):
 
 ```sh
 git clone https://github.com/santiagofr1/rtop
@@ -62,36 +75,37 @@ cargo build --release
 ./target/release/rtop-gui    # GUI
 ```
 
-Para compilar la GUI en Debian/Ubuntu pueden hacer falta estos paquetes:
+Building the GUI on Debian/Ubuntu may require these packages:
 `libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev`.
 
-## Uso
+## Usage
 
 ```sh
-rtop          # en la terminal
-rtop --gui    # abre la ventana (igual que rtop-gui)
+rtop          # in the terminal
+rtop --gui    # open the window (same as rtop-gui)
 ```
 
-Teclas de la TUI:
+TUI keys:
 
-| Tecla | Acción |
+| Key | Action |
 |---|---|
-| `↑↓` / `j k`, `PgUp PgDn`, `g G` | moverse |
-| `/` o `F3` | filtrar procesos |
-| `c m n i t` | ordenar por CPU, memoria, nombre, PID o tiempo |
-| `s` / `Tab` / `F6` | cambiar el orden · `r` invertirlo |
-| `x` / `F9` / `Supr` | matar el proceso (`9` para SIGKILL) |
-| `p` / `Espacio` | pausar |
-| `l` | mostrar la línea de comando completa |
-| `v` | mostrar u ocultar los gráficos |
-| `T` | cambiar de tema |
-| `+ -` | ajustar el refresco |
-| `?` / `F1` | ayuda |
-| `q` / `F10` | salir |
+| `↑↓` / `j k`, `PgUp PgDn`, `g G` | Move |
+| `/` or `F3` | Filter processes |
+| `c m n i t` | Sort by CPU, memory, name, PID, or time |
+| `s` / `Tab` / `F6` | Change sort column · `r` to reverse it |
+| `x` / `F9` / `Del` | Kill the process (`9` for SIGKILL) |
+| `p` / `Space` | Pause |
+| `l` | Show the full command line |
+| `v` | Show or hide graphs |
+| `T` | Switch theme |
+| `+ -` | Adjust the refresh rate |
+| `?` / `F1` | Help |
+| `q` / `F10` | Quit |
 
-## Configuración
+## Configuration
 
-`~/.config/rtop/config.toml` es la misma para la TUI y la GUI. Los cambios que hacés desde la app se guardan solos.
+`~/.config/rtop/config.toml` is shared by the TUI and the GUI. Changes you make from the app are saved
+automatically.
 
 ```toml
 theme = "nord"          # default | nord | gruvbox | dracula | tokyo | mono
@@ -99,42 +113,46 @@ refresh_ms = 1000
 show_graphs = true
 show_cmd = false
 
-[colors]                # opcional: cambia colores del tema elegido
+[colors]                # optional: override colors of the selected theme
 accent = "#ff8800"
 ```
 
-## Cómo está armado
+## Architecture
 
 ```
 crates/
-├── rtop-core   # el motor: recolecta y parsea datos del sistema (sin UI, con tests)
-├── rtop        # TUI con ratatui
-└── rtop-gui    # GUI con egui/eframe
+├── rtop-core   # the engine: collects and parses system data (no UI, with tests)
+├── rtop        # TUI with ratatui
+└── rtop-gui    # GUI with egui/eframe
 ```
 
-Todo lo que lee del sistema vive en `rtop-core`. Si querés sumar una métrica nueva, empezás ahí y las dos interfaces la pueden usar.
+Everything read from the system lives in `rtop-core`. To add a new metric, start there and both interfaces can
+use it.
 
-## Es tuyo también: forkealo, rompelo, mejoralo
+## Contributing
 
-rtop es **software libre** bajo licencia MIT. Lo podés usar, copiar, modificar y redistribuir como quieras, incluso en proyectos comerciales.
+rtop is **free software** under the MIT license. You can use, copy, modify, and redistribute it however you like,
+including in commercial projects.
 
-El software libre funciona porque la gente se anima a meter mano. No hace falta ser experto en Rust ni pedir permiso:
+Free software works because people dive in. You don't need to be a Rust expert or ask for permission:
 
-- **Forkealo** y hacé tu propia versión: otro layout, otra paleta, métricas que a vos te sirvan. Si sale algo lindo, contalo.
-- **Mandá un PR**, por chico que sea. Arreglar un typo, sumar un tema de colores o mejorar un parser cuenta igual.
-- **Abrí un issue** si algo no anda en tu hardware. Con tantas GPUs, sensores y baterías distintas, tu reporte es lo que hace que funcione para todos.
-- **Proponé ideas**: soporte para otras distros, empaquetado para Arch/Fedora, Flatpak, nuevas páginas, exportar datos…
+- **Fork it** and make your own version: a different layout, another palette, the metrics you care about. If it
+  turns out nice, share it.
+- **Send a PR**, however small. Fixing a typo, adding a color theme, or improving a parser all count.
+- **Open an issue** if something doesn't work on your hardware. With so many different GPUs, sensors, and
+  batteries out there, your report is what makes it work for everyone.
+- **Suggest ideas**: support for other distros, Arch/Fedora packaging, Flatpak, new pages, data export…
 
-Algunas buenas primeras contribuciones:
+Some good first contributions:
 
-- [ ] Temas de colores nuevos (`crates/rtop-core/src/config.rs`)
-- [ ] Ícono propio para la app
-- [ ] Paquetes para otras distros (AUR, RPM, Flatpak)
-- [ ] Más tests para los parsers de `rtop-core`
-- [ ] Traducción al inglés
+- [ ] New color themes (`crates/rtop-core/src/config.rs`)
+- [ ] A proper app icon
+- [ ] Packages for other distros (AUR, RPM, Flatpak)
+- [ ] More tests for the `rtop-core` parsers
+- [ ] English translation of the interface
 
-La guía para arrancar está en [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
 
-## Licencia
+## License
 
-[MIT](LICENSE). Hacé lo que quieras con el código, solo mantené el aviso de copyright.
+[MIT](LICENSE). Do whatever you want with the code, just keep the copyright notice.
